@@ -1,6 +1,6 @@
 # 04 · 本次运行健康 + 日志分片
 
-- **Status**: `ready-for-agent`
+- **Status**: `ready-for-human`（实现已完成；剩余步骤需要人或真人玩家在场）
 - **Blocked by**: 无
 - **归属文件**: `src/inspect.ts`、`src/commands.ts`、`src/cli.tsx`、`src/tui.tsx`、`src/state.ts`
 - **契约**: `spec.md` §契约 5（健康与日志分片）
@@ -82,3 +82,10 @@ health [--json]       人读：本次运行 id、error.log 状态（非空则显
 
 - `warning.log` 的 `[DETOUR]`/`[ZIP-ATTACH]` 是 R5F 改版启动自检的正常输出（该构建是带 Detour hook 的改版），**不要**当成故障。
 - `Installed NetKey: '…'` 会出现在日志里（启动时 + 运行中至少一次），属运行期密钥 → README 的"分享日志前注意"里提一句。
+
+## 实现记录（2026-09-14）
+
+- 已完成：日志分片 `logs/<版本>-<端口>-<时间戳>.log`、`logs --all/--run`、按 `logRetention` 清理、`health [--json]`、体检页"本次运行"块（并自动并入"待处理"）。
+- 实测证据：三次启动生成三个分片（`logs --all` 最新在前并标"本次运行"）；注入的两个最旧假分片被策略删除、真实分片未误删；健康运行 `error.log` 空 exit 0；追加两行后报红 exit 1，还原后恢复 exit 0。
+- 真发现：健康检查立刻抓到一次真实故障 —— `fs_1v1` 脚本在**同时存在 2 个机器人**时报 `_1v1_match.nut InputChanged is not a registered signal` 并 `Shutdown host game`（`error.log` 202 字节）。属引擎/脚本行为，非本批代码；机器人验收请用单个具名机器人。
+- 与 ticket 的偏差：`cmdStop` 会把 `runtime` 置 `null`（ticket 里"保持指向最后一次"不成立）→ `logs` 回落到该版本最新分片并给出提示。

@@ -1,0 +1,22 @@
+# 编辑器与本仓库格式化工具的公共约定。
+# oxfmt 会读取 end_of_line / indent_style / indent_size / max_line_length /
+# insert_final_newline 五项（见 https://oxc.rs/docs/guide/usage/formatter/config.html）；
+# 显式写在 .oxfmtrc.jsonc 里的值优先，这里保证其它编辑器与 oxfmt 同频。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_style = space
+indent_size = 2
+insert_final_newline = true
+trim_trailing_whitespace = true
+max_line_length = 120
+
+# 换行敏感的渲染器（GitHub 等）用行尾两空格表示硬换行，别裁。
+[*.md]
+trim_trailing_whitespace = false
+
+# cmd.exe 对 LF 结尾的批处理支持有已知缺陷（标签与 if 块），保持 CRLF。
+[*.bat]
+end_of_line = crlf

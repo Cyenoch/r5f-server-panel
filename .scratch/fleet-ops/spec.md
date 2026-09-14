@@ -1,7 +1,7 @@
 # 规格：运营能力增强（机器人 / 控制台回执 / 审核 / 健康与日志 / 公告 / 1v1）
 
 - **状态**：`ready-for-agent`
-- **实现状态**：未开始（本文件为设计基线；每个 ticket 的 `Status:` 行是执行状态）
+- **实现状态**：**本批 6 项已落地**（2026-09-14，见文末"实现结果"与各 ticket 的"实现记录"）；剩余步骤均需真人（封禁生效、公告可见、1v1 对局体验）
 - **追踪器**：本地 markdown（见 `docs/agents/issue-tracker.md`）
 - **证据来源**：本规格中所有引擎行为断言都来自以下之一，不含推测
   - 实机探测：托管控制台控制通道（`R5F_CONSOLE_IN`）向正在运行的 r5f-dedi 1.0.13 发命令并读回日志
@@ -184,3 +184,16 @@ TUI：
 - **日志里会出现 `Installed NetKey: '...'`**（实测启动时 1 次、运行中 809s 时又出现 1 次，原因未知）→ 日志分享前注意其中含运行期密钥；列入 roadmap 的"日志治理"。
 - **`sv_quota_scriptExecsPerSecond`** 是引擎真实 cvar 名（`server.dll` 符号表），现有实现写的是这个名字（正确）；`autoexec_server_dev.cfg` 里的是 `sv_quota_stringCmdsPerSecond "256"`。
 - 全部 six 项的证据、判定与状态见 `roadmap.md`；逐项执行契约见 `issues/NN-*.md`。
+
+## 实现结果（2026-09-14）
+
+六项全部落地，逐项证据见 `issues/NN-*.md` 的"实现记录"。汇总：
+
+- **新增模块**：`src/receipt.ts`（回执分类，纯函数）、`src/announcements.ts`（公告表读写，`csv-parse` + `csv-stringify`）。
+- **CLI 新增**：`bots`、`banlist`、`announce`、`announcements`、`mode`、`health`；`console` 增加 `--json/--wait` 与退出码 0/1/2；`logs` 增加 `--all/--run`。
+- **面板新增**：公告页 `n`、封禁名单页 `B`、体检页"本次运行"健康块、玩家页机器人/封禁/解封按键、设置页模式选择器与 `x` 立即切换。
+- **数据**：`playlist = fs_1v1`、`map = mp_rr_arena_habitat`（用户指令：游戏模式先固定 1v1）；`defaultSettings` 同步；日志按运行分片并入 `logRetention`。
+- **验证**：`bunx tsc -p tsconfig.json` 干净；CLI 真机烟测（回执四类、bots 增删清、`ban --minutes` 零字节拒绝、公告 CSV 字节往返、`mode set`、分片与 `health` 报红/复位）；面板 PTY 逐页确认（公告/封禁名单/体检/设置）。
+- **模板偏差（已按实测处理）**：`kick` 对机器人可能静默 → `bots clear` 按名字回退；`cmdStop` 置 `runtime = null` → `logs` 回落最新分片；`ban --minutes/--reason`、`mute` 一律不发送、明确拒绝。
+- **仍未验证（需真人）**：封禁/禁言的实际生效、公告的可见效果、1v1 对局体验（realm 隔离/锁定套装）。
+- **未做（等指令）**：exe 未重建（`bun run build`），验证期间启动的引擎实例已停止（`runtime = null`）。

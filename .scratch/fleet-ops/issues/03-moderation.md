@@ -1,6 +1,6 @@
 # 03 · 审核能力与封禁名单
 
-- **Status**: `ready-for-agent`
+- **Status**: `ready-for-human`（实现已完成；剩余步骤需要人或真人玩家在场）
 - **Blocked by**: 02（回执分类：审核动作必须报告引擎真实回答）
 - **归属文件**: `src/commands.ts`、`src/cli.tsx`、`src/keys.ts`、`src/tui.tsx`、`src/ui.ts`
 - **契约**: `spec.md` §契约 4（审核）
@@ -63,3 +63,10 @@ banlist [--reload] [--json]             --reload 先发 banlist_reload，再读�
 
 - 真人端到端（真的封掉一个真人、看他被拒绝进入）在本机做不到 → 该验证步骤写进 README 交给服主，并在 `roadmap.md` 保持 `需验证`。
 - `unban` 需要 id64；面板从玩家行取（真人行的第 3 列）。
+
+## 实现记录（2026-09-14）
+
+- 已完成：`ban`/`unban`（回执如实）、`banlist [--reload] [--json]`（三处查找顺序 + 键值原样 + 无文件解释）、面板玩家页 `b`/`u` 确认对话框、封禁名单页（`B`）。
+- 实测证据：`ban 1` → "已发送（引擎无回执）" exit 0；`ban --minutes 30` → exit 1 且**零字节发送**（水位线 2335→2335 相等）；合成 `banlist.json`（对象/数组/中文/坏 JSON）解析与退出码正确，测试文件已删。
+- 仍未验证（需真人）：封禁/禁言的实际生效；时长与原因属 Spire 侧模型（`banType`/`banExpires`）。本机 `banlist.json` 至今未被引擎创建。
+- 不做：`mute`（命令不存在）、`ban --minutes/--reason`（参数形式未实证，明确拒绝）。

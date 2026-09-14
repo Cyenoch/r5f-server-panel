@@ -1,6 +1,6 @@
 # 01 · 机器人管理
 
-- **Status**: `ready-for-agent`
+- **Status**: `ready-for-human`（实现已完成；剩余步骤需要人或真人玩家在场）
 - **Blocked by**: 无
 - **归属文件**: `src/commands.ts`、`src/cli.tsx`、`src/tui.tsx`、`src/keys.ts`
 - **契约**: `spec.md` §契约 3（机器人）
@@ -61,3 +61,11 @@ bots clear                                    逐个 kick "<userid>"，直到没
 
 - 机器人 `connected` 字段会一直涨（实测 01:10 仍在），不要拿它当"卡住"的判据。
 - `spawnbots 0` 的语义未被证实（实测它生成了 1 个机器人）→ **不要**把 `--count 0` 映射成 `spawnbots 0`；`--count 0` 应视为参数错误。
+
+## 实现记录（2026-09-14）
+
+- 已完成：`bots [list|add|clear]`（`--json`/`--count`/`--name`/`--team`）、面板玩家页 `+`/`-`/`c`、机器人标记（`uniqueid === "0"`）。
+- 实测证据：`bots add --count 2` → `status` 显示 3 bots；`bots add --name ProbeBot --team 0` → `bots list --json` 出现；`bots clear` 报告清理数并归零；`--count 0` 退 1 且不发送。
+- 顺带修的真 bug：`parseStatusBlock` 的 uniqueid 正则要求 ≥5 位数字，把机器人行（`# 1 "bot0" 0 …`）整行丢掉 → 改为 `\d+`。
+- 与 ticket 证据的偏差（已按实测处理）：本机 1.0.13 上 `kick "<userid>"` 对机器人**静默且不生效**，`kick "<玩家名>"` 才回 `Kicked '…' from server` → `bots clear` 先按 userid、无 success 再用名字重试，只有 success 才算踢掉。
+- 待真人：无。

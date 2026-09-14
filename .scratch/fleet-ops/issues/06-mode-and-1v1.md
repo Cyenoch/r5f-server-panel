@@ -1,6 +1,6 @@
 # 06 · 模式目录与固定 1v1
 
-- **Status**: `ready-for-agent`
+- **Status**: `ready-for-human`（实现已完成；剩余步骤需要人或真人玩家在场）
 - **Blocked by**: 无（与 05 并行）
 - **归属文件**: `src/catalog.ts`、`src/settings-fields.ts`、`src/commands.ts`、`src/cli.tsx`、`src/tui.tsx`、`README.md`
 - **契约**: `spec.md` §契约 7（1v1）
@@ -105,3 +105,10 @@ mode set <playlist> [map]       bridge_setmode <playlist> <map>；map 省略时�
 
 - `fs_1v1` 的 `map_name` 是空串（引擎注释：加载屏用实际加载的关卡名）→ 别指望从这里取默认地图，用 `r5f_mode_map` 或地图清单。
 - 1v1 实际对局体验（realm 隔离、锁定套装）本机无法验证（需真人）→ 保持 `需验证`。
+
+## 实现记录（2026-09-14）
+
+- 已完成：`catalog.modes`（12 家族 / 41 模式，按 `r5f_mode_*` 元数据）、`mode list`（家族分组）、`mode set <playlist> [map]`（`bridge_setmode`）、设置页模式选择器（家族分组、1v1 最前、地图收敛到该模式清单）、`x` 立即切换、对外上报可见性与开关（`statsUpload` → `+fs_stats_url ""`）。
+- 实测证据：`fs_1v1` family = `1v1`、11 张图、含 `mp_rr_arena_habitat`；`fs_lgduels_1v1` 同族 12 图；`mode set fs_1v1 mp_rr_arena_habitat` 触发引擎换模式行、回执如实；无实例时 `mode set` 退 2。
+- 数据变更（用户指令"游戏模式先固定 1v1"）：`r5-server.json` 的 `playlist = fs_1v1`，地图改为该模式内的 `mp_rr_arena_habitat`（原 `mp_rr_district` 不在 1v1 清单内）；`defaultSettings` 同步。备份在 `.tmp/r5-server.json.bak`。
+- 待真人：1v1 对局体验（realm 隔离、锁定套装）。

@@ -1,0 +1,65 @@
+{
+  // Oxlint 配置。文档：https://oxc.rs/docs/guide/usage/linter
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+
+  // 默认插件集是 eslint / typescript / unicorn / oxc；这里全量重列，
+  // 因为 plugins 字段会覆盖默认值。react 供 ink 的 TSX 使用，
+  // import 提供跨文件分析（no-cycle）。
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "react", "import"],
+
+  // 运行时：Node 全局（process / console / Buffer / Response…）。
+  // bun 专有全局不在 env 里，单独声明。
+  "env": { "node": true },
+  "globals": { "Bun": "readonly" },
+
+  "options": {
+    // 类型感知规则由 tsgolint 执行，需要 devDependency oxlint-tsgolint。
+    "typeAware": true,
+    // 留下一个已失效的 oxlint-disable 注释属于噪音，报出来。
+    "reportUnusedDisableDirectives": "warn",
+    // warning 同样阻断退出码：perf / suspicious 的区别是「问题性质」，
+    // 不是「可以放过」——告警堆积到最后就是没人看。
+    "denyWarnings": true
+  },
+
+  // correctness：确凿的错误，默认就是 error，显式写出来便于审阅。
+  // suspicious：很可能出错 —— 一律 error，避免告警堆积后被无视。
+  // perf：能明显更省的写法 —— 单文件 82 MB 的 CLI，值得盯。
+  // pedantic / style / restriction / nursery 不启用：
+  // 风格交给 oxfmt，其余两类误报率高。
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "warn"
+  },
+
+  "rules": {
+    // 模块图里的环会让求值顺序变成隐式契约：19 个模块的 CLI 里必须为零。
+    "import/no-cycle": "error",
+
+    // 本项目到处 spawn 进程、写文件；漏掉 await 的 Promise 是最真实的故障源。
+    "typescript/no-floating-promises": "error",
+    "typescript/no-misused-promises": "error",
+    "typescript/await-thenable": "error",
+
+    // CONTEXT.md 不变量 6「无 any」：unknown + 类型守卫。
+    "typescript/no-explicit-any": "error",
+
+    // 关掉：本项目在边界处解析 JSON（r5-server.json、PowerShell 输出、CSV），
+    // 通行写法就是「先 typeof 判对象，再断言成具名/Record 类型，然后逐字段
+    // 用 readString/readNumber 这类窄化读取器取值」。仓库规则明确禁止用
+    // 自造 isRecord 守卫绕开这点（守卫只证明是对象，不证明字段），而本项目
+    // 又没有 schema 校验器 —— 开着这条规则只会把人逼回被禁的写法。
+    "typescript/no-unsafe-type-assertion": "off",
+
+    // 本 CLI 的循环等待几乎都是「轮询引擎就绪」「顺序下发命令」这类
+    // 必须串行的动作，并行反而是错的（例如必须等进程绑定端口才能探下一个）。
+    // 逐个加行内 disable 只会把源码弄脏，所以在配置里统一关掉。
+    "no-await-in-loop": "off"
+  },
+
+  // 目录遍历本身已按 .gitignore 过滤，这里只补 .gitignore 管不到的部分：
+  // 一次性探针脚本、工作笔记（.scratch 里除了规格文档还常有验证用 .ts）、
+  // 以及 vendored 的 skill 正文。
+  "ignorePatterns": [".tmp/**", "tmp-*.ts", ".scratch/**", ".agents/**", "node_modules/**", "dist/**"]
+}

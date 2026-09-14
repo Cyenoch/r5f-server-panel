@@ -1,6 +1,6 @@
 # 02 · 控制台回执校验
 
-- **Status**: `ready-for-agent`
+- **Status**: `ready-for-human`（实现已完成；剩余步骤需要人或真人玩家在场）
 - **Blocked by**: 无
 - **归属文件**: `src/receipt.ts`（新，纯函数）、`src/commands.ts`、`src/cli.tsx`、`src/tui.tsx`
 - **契约**: `spec.md` §契约 2（命令回执分类）
@@ -90,3 +90,10 @@ console <command...> [--json] [--wait <ms>]
 
 - 引擎对**存在但无输出**的命令不给任何回执（`bridge_chat_announce`、`ban`、`banid`、`unban`、`banlist_reload`、`sv_cheats` 实测如此）→ "静默"是一等公民，不是错误。
 - `console` 的输出可能非常大（实测 `activity_dump` 回 983 行）→ 只保留前 `--wait` 窗口内的行，UI 里截断显示，`--json` 里给行数。
+
+## 实现记录（2026-09-14）
+
+- 已完成：`src/receipt.ts`（纯函数分类）、水位线（`logWatermark`/`readAfter`）、`consoleWithReceipt`、`console --json/--wait`、退出码 0/1/2、面板按 kind 着色。
+- 实测证据：`console status` → 成功（`hostname: …`）exit 0；`console say hello` → `Command 'say' doesn't exist…` exit 1；`console sv_addbot` → `usage 'sv_addbot': …` exit 1；`console bridge_chat_announce` → 静默 exit 0；连续两次 `status --json` 各 7 行（水位线不累积）。
+- 设计补充：`silent` 定义为"没有可判定的行"，`lines` 仍带回未匹配输出供界面展示。
+- 待真人：无。

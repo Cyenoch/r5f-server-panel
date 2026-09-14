@@ -1,0 +1,30 @@
+{
+  // Oxfmt 配置。文档：https://oxc.rs/docs/guide/usage/formatter
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+
+  // 默认 100 会把现有代码里 100–120 列的行反复折行；本仓库一直按 120 写。
+  "printWidth": 120,
+
+  // 其余全部落在 oxfmt 默认值上（双引号 / 分号 / 尾逗号 all / 2 空格 / LF），
+  // 与现有代码一致，不写出来以免出现第二份事实来源。
+
+  // import 排序：现有代码已按「node 内建 → 外部包 → 相对路径」排列且不留空行，
+  // 分组沿用默认值，只关掉组间空行以贴合现状。
+  "sortImports": { "newlinesBetween": false },
+
+  "ignorePatterns": [
+    // 一次性探针脚本，不属于本仓库的风格管辖范围。
+    "tmp-*.ts",
+    ".tmp/**",
+    // vendored：.agents/skills 是 skills-lock.json 的安装产物，改了会在下次安装时被覆盖。
+    ".agents/**",
+    // 版本目录只读（CONTEXT.md 不变量 7）：里面有引擎自带的 README.md 与 JSON，
+    // 属于 4 GB 级游戏内容，任何一次误格式化都不可逆。
+    "r5f-dedi-*/**",
+    "r5-server.json",
+    "logs/**",
+    "backups/**",
+    "node_modules/**",
+    "dist/**",
+  ],
+}

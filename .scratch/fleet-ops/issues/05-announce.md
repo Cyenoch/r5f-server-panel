@@ -1,6 +1,6 @@
 # 05 · 公告（轮播文案 + 广播）
 
-- **Status**: `ready-for-agent`
+- **Status**: `ready-for-human`（实现已完成；剩余步骤需要人或真人玩家在场）
 - **Blocked by**: 02（广播命令是静默类，必须走回执分类报告"引擎无回执"）
 - **归属文件**: `src/announcements.ts`（新）、`src/commands.ts`、`src/cli.tsx`、`src/tui.tsx`、`src/keys.ts`、`package.json`
 - **契约**: `spec.md` §契约 6（公告）
@@ -103,3 +103,9 @@ announce                              触发 bridge_chat_announce，走回执分
 - 不要实现 `say`/`chat_announce`（实测不存在）。
 - 广播的**可见效果**需要真人在场 → `roadmap.md` 保持 `需验证`。
 - 文案里的 `play.r5flowstate.org` 是 R5F 社区地址（默认文案），换服请自行改文案。
+
+## 实现记录（2026-09-14）
+
+- 已完成：`src/announcements.ts`（`csv-parse` + `csv-stringify`，preamble 原样保留）、`announcements list|add|remove`、`announce`、面板公告页（`n`：列表 / 新增对话框 / 删除 / 触发 / 重新读取）。
+- 实测证据：真实 CSV `parse → render` **字节完全一致**（869 B，sha256 与原件相同）；含逗号文案正确加引号且 `remove` 后 sha256 还原；65 字符被拒退 1 且不写文件；CRLF 往返通过；`announce` 后引擎无 `doesn't exist`（命令被接受）。
+- 待真人：广播的可见效果（需真人在场看聊天框）。

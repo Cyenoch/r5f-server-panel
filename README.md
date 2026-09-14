@@ -140,6 +140,16 @@
 
 **退出码**：`console` / `kick` / `ban` / `unban` / `bots add` → `0` 成功或静默、`1` 命令不存在或用错、`2` 没有控制通道（没启用托管控制台）；`setup` / `autostart` → `1223` 表示用户拒绝了 UAC。
 
+#### 1v1 模式（当前默认）
+
+本机默认已固定成 1v1：`playlist = fs_1v1`、`map = mp_rr_arena_habitat`（都在 `r5-server.json` 里，面板"游戏设置"可改）。
+
+- `fs_1v1` 是版本自带的 R5F 模式（`platform/playlists_r5_patch.txt`），家族 `1v1`，声明了 11 张可轮换地图（`fs_1v1_rotate_mp_rr_*`）。
+- 运行中换模式/地图不用重启：`mode set fs_1v1 mp_rr_arena_phase_runner`（面板：设置页选中"模式"行后按 `x`）。它走引擎的 `bridge_setmode`，一步换 playlist + 换图。
+- 模式自己的参数（装备套装 `fs_1v1_locked_set`、自定义武器 `custom_1v1_weapons_*`、轮换图开关）写在该模式的 `vars` 块里，改完 `changelevel` 或重启生效。
+- 同家族还有 `fs_lgduels_1v1`（R99 上膛决斗）。
+- 1v1 对战统计默认会 POST 到 `play.r5flowstate.org`；不想外发就把"1v1 数据上报"设为"关闭上报"（启动参数追加 `+fs_stats_url ""`）。
+
 ## 配置
 
 唯一配置文件是根目录的 `r5-server.json`（写入采用临时文件 + 改名，崩溃不会截断）：
@@ -310,6 +320,7 @@ r5-server\
 - **`ban --minutes` / `--reason` 不支持**：封禁时长与原因是 Spire 侧的模型，面板只发 `ban <target>`；给了这两个参数会直接报错退出，不会把半截命令发到引擎。
 - **`mute`（禁言）未实现**：本构建没有可用的禁言命令。
 - **`say` / `chat_announce` 不存在**：实测引擎报错。广播公告用 `announce`（`bridge_chat_announce`）+ `announcements` 编辑文案表。
+- **`fs_1v1` 模式下多机器人会崩服**：实测同时放 2 个机器人时脚本报 `_1v1_match.nut InputChanged is not a registered signal` 并 `Shutdown host game`（`error.log` 会记录，`health` 立刻报红）。用机器人验证 1v1 时**只放一个具名机器人**（`bots add --name ProbeBot --team 1`）。
 - **机器人不可封禁**：`spawnbots` / `sv_addbot` 造出来的假玩家 `uniqueid == "0"` 且无地址，只能踢。
 - **踢人必须带引号**：`kick "<userid>"`——不带引号无效，面板已处理。
 - **封禁/解封无回执**：引擎不回话，面板无法确认结果；`banlist.json` 由引擎在首次真正写入封禁后生成，不一定存在。
