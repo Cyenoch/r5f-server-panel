@@ -67,6 +67,9 @@ r5-server 的领域词汇表与模块地图。文档基建：`AGENTS.md`（约�
 - 不存在（实测报错）：`say`、`say_team`、`chat_announce`、`mute`、`find`、`cvarlist`、`mp_timelimit`。
 - 级别：`Native(E)/(F)` **不是**错误级别（`Native(E)` 里有正常行）；判级别按文件与词。
 - 外发：1v1 对战统计 POST 到 `https://play.r5flowstate.org/stats/1v1/ingest`（`fs_stats_url`，置空即关闭）；Spire 匹配/封禁走 `spire_matchmaking_hostname`；`-offline` 关闭匹配。
+- Spire 上报（实测日志 + 主服接口）：每 `spire_host_update_interval`（默认 5 s）POST `https://play.r5flowstate.org/spire/hosts/publish`，body = `name` `description` `hidden` `map` `playlist` `ip` `port` `key` `checksum` `version` `numPlayers` `maxPlayers` `timeStamp` `password`。
+- 上架条件（实测）：`ip` 正确（`+hostip <公网IP>[:端口]`，引擎在 NAT 主机上自测为 `[::1]:0`，`net_public_adr` 无效）+ **publish 从主机自己的公网 IP 出去**（主机上跑代理/VPN 会改出口 IP，主服照样判不可达；实测加直连规则后立即上架）+ 两道门放行 UDP。主服会 UDP 探测该 `ip:port`（`pktmon` 抓包可见双向包），探测不过即回 `{"success":false,"error":"Unable to communicate, please forward your ports and check if the server is publicly accessible."}` —— 主服文案，引擎原样打印（二进制里搜不到，`rate limit exceeded` 同理）。
+- 列表查询（实测）：`POST /spire/hosts`，body `{"version":"R5FlowstateSDK002"}` → `{servers:[{ip,port,name,numPlayers,map,playlist,key,hidden,hasPassword,maxPlayers,description,checksum,allowedMods,requiredMods,modsProfile}],players,capacity}`；空 body 回 `{"error":"Missing required fields.","success":false}`。官方 `r5flowstate.org/host/`：探测不过的服不会出现在列表。相关 cvar：`hostip`、`hostport`（cfg 默认 37015）、`clientport` 37005、`s2sPort` 37016、`spire_showdebuginfo`（1 = 打印请求/回包）、`_sdk_apply_launch_convars`（`+cvar` 启动参数压回 cfg 之上）。
 - 日志含运行期密钥（`Installed NetKey: '…'`）→ 分享日志前注意。
 
 ## 权威来源

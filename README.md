@@ -315,6 +315,23 @@ r5-server\
 | 换图时卡顿                              | 同上，页面文件太小或机械盘；内容盘建议 NVMe                                                                   |
 | 开机没自启                              | `autostart status`；`logon` 触发的任务需要自动登录（`netplwiz`）或重启后登录一次                              |
 | 命令看起来"没反应"                      | 看回执类别：`silent` 表示引擎不回话（不是失败），`unknown` 才是命令不存在                                     |
+| 列表里看不到自己的服                    | 主服按你上报的地址探不到。见下面「上架失败排查」                                                              |
+
+### 上架失败排查（列表里看不到自己）
+
+`Unable to communicate, please forward your ports and check if the server is publicly accessible.` 是**主服回的 `error`**，引擎只转述：引擎 POST `/spire/hosts/publish` 上报自己的 `ip:port`，主服探不到就不上架。它会进 `error.log`，所以 `health` 报红，但服务器没崩。
+
+| 事实                                                                                                                          | 依据                                                     |
+| ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
+| 上报的 `ip` 取自 cvar `hostip`（"Host game server ip"）；NAT 主机上实测是 `[::1]:0`（引擎取不到对外地址）                     | publish 报文与 cvar dump 同值                            |
+| 用 `+hostip <公网IP>:<端口>`（或只写 IP）实测**能**改写上报值；`net_public_adr` 无效                                          | 改完 publish 的 `ip` 立即变化                            |
+| **publish 必须从主机自己的公网 IP 出去**：主机上跑代理/VPN（TUN 模式，如 Clash Verge）时主服看到的是代理出口 IP，一样判不可达 | 实测：代理在时一直失败，给主服域名加直连规则后立即上架   |
+| 主服确实会 UDP 探测那个 `ip:port`，且本机引擎会应答                                                                           | `pktmon` 抓包可见探测主机 ↔ 本机 `37015` 双向 UDP        |
+| 主服列表可直接查：`POST https://play.r5flowstate.org/spire/hosts`，body `{"version":"R5FlowstateSDK002"}`                     | 官网前端 JS 里的接口，回 `servers[]`                     |
+| 那句英文（与 `rate limit exceeded`）是主服文案，二进制里搜不到                                                                | 只出现在 `/spire/...` 回包之后                           |
+| TCP 通 ≠ UDP 通；本构建没有 A2S，外部 UDP 探针没回应不能定罪                                                                  | 云侧按「协议 + 端口」逐条放行；`server.dll` 搜不到 `A2S` |
+
+要看的就四处：面板「可见性」= 公开（为 0 时面板传 `-offline`，根本不上报）；**主机上没有会改出口 IP 的代理/VPN**（有就给主服域名加直连规则或退出）；附加参数 `+spire_showdebuginfo 1` 后看 publish 的 `ip`（不是公网地址就补 `+hostip <公网IP>:<端口>`）；两道门放行 UDP（云防火墙 + `setup --ports`），云侧放行与否看 RST/超时——放行的端口没人监听回 `ConnectionRefused`，没放行的只会 `timeout`。
 
 ## 已知边界
 
@@ -328,6 +345,8 @@ r5-server\
 - **Windows 限定**：所有进程、端口、防火墙、提权逻辑都依赖 PowerShell 与 Win32 API。
 - **控制通道只回环**：不提供远程管理端口；远程运维走 SSH / 私网隧道。
 - **`r5f-dedi` 目录只读**：面板不会修改引擎内容，除了 cfg 同步与用户主动编辑的公告表。
+- **`hostport` 面板不同步**：`-port` 只管绑定，对外端口是 cfg 的 `hostport`（`startup_dedi_default.cfg` 里钉 `"37015"`，不在 cfg 同步表内）→ 换端口要么就用 37015，要么手工改那一行。
+- **`statsUpload=off`（`+fs_stats_url ""`）实测没关掉上报**：引擎把空值解析成了**别的 token**（实测 `"fs_stats_url" = "-ansicolor"`）。用这个开关前先核对引擎回显的那行。
 
 ## 开发
 
