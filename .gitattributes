@@ -1,0 +1,9 @@
+# 行尾策略：与 .editorconfig 一致，但由 Git 强制执行。
+#
+# 缺这份文件时，Windows 默认 core.autocrlf=true 会把检出改成 CRLF，而 oxfmt 按
+# .editorconfig（end_of_line = lf）判定格式 —— 全新克隆第一件事就是
+# `bun run check` 报「Format issues found in above 38 files」。
+* text=auto eol=lf
+
+# cmd.exe 对 LF 结尾的批处理支持有已知缺陷（标签与 if 块），保持 CRLF。
+*.bat text eol=crlf
