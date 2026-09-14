@@ -1,0 +1,60 @@
+# ── 服务端版本目录 ────────────────────────────────────────────────
+# 一个版本目录 = 4 GB 级引擎内容，靠解压获得，不进版本库。
+# 发现规则见 src/versions.ts：含 r5apex_ds.exe + server.dll + loader.dll 三件套。
+r5f-dedi-*/
+
+# 兜底：三件套出现在别的目录名下时同样忽略
+r5apex_ds.exe
+server.dll
+loader.dll
+
+# ── 构建产物 ──────────────────────────────────────────────────────
+# bun run build 的输出（82 MB 单文件可执行程序）
+/r5-server.exe
+*.tsbuildinfo
+dist/
+
+# ── 运行时状态（机器本地：pid / ctlToken / 明文密码 / 绝对路径）─────
+/r5-server.json
+/r5-server.json.tmp
+/backups/
+/logs/
+*.log
+
+# 日志守护写入的 pid 文件
+*.pid
+
+# ── 依赖 ──────────────────────────────────────────────────────────
+node_modules/
+.bun/
+
+# ── 临时与实验文件 ────────────────────────────────────────────────
+/.tmp/
+*.tmp
+*.bak
+*.orig
+*.rej
+*~
+
+# ── 环境变量 ──────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── 编辑器 / 操作系统 ─────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# ── 以下保持入库，勿加规则 ────────────────────────────────────────
+# .scratch/                 本仓库的 issue tracker（docs/agents/issue-tracker.md）
+# .agents/skills/           从 skills-lock.json 安装的技能正文，入库换取「克隆即可用」
+#                           （若改由安装器按 lock 还原，加一行 .agents/skills/ 即可）
+# skills-lock.json          技能依赖锁
+# bun.lock                  Bun 依赖锁
+# start_dedi.bat            双击启动入口，手写而非生成
+# src/ docs/ AGENTS.md CONTEXT.md README.md tsconfig.json package.json
+# .oxlintrc.json .oxfmtrc.jsonc .editorconfig    检查 / 格式化 / 编辑器约定
