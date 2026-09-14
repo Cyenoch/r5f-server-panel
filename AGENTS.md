@@ -24,3 +24,7 @@ oxlint and oxfmt own linting and formatting; this repo has no ESLint or Prettier
 - `r5f-dedi-*/` is read-only game content and deliberately excluded from both tools.
 
 Config: `.oxlintrc.json`, `.oxfmtrc.jsonc`, `.editorconfig`. Rationale for the non-default choices: README §五.
+
+## Dependencies
+
+Newest versions only, but every package must be at least 24 h old: `bunfig.toml` sets `install.minimumReleaseAge = 86400`, honored by `bun install` / `bun add` / `bun update`. Upgrade with `bun update --latest`; it rewrites the ranges too, and when the newest release is younger than the window it resolves to the previous compliant version instead.

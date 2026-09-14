@@ -807,7 +807,8 @@ function printSettingsTable(state: State): void {
   for (const field of SETTINGS_FIELDS) {
     const value = field.display(state.settings);
     const isDefault = state.settings[field.id] === field.defaultValue;
-    kv(padEndWidth(field.label, width), isDefault ? dim(value) : green(value));
+    const engine = field.engineName ? dim(`  ${field.engineName}`) : "";
+    kv(padEndWidth(field.label, width), `${isDefault ? dim(value) : green(value)}${engine}`);
   }
   console.log("");
   console.log(dim(`  改动：r5-server settings --hostname "我的服" --map mp_rr_district --visibility 2`));

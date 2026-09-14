@@ -76,6 +76,18 @@ export type LogSummary = {
   lastStamp?: string;
 };
 
+/** 引擎状态机取值 → 中文；未知取值不给词（面板宁可不显示，也不暴露内部状态名）。 */
+const GAME_STATE_LABELS: Record<string, string> = {
+  WaitingForPlayers: "等待玩家",
+  Playing: "对局进行中",
+  Running: "运行中",
+  Loading: "加载中",
+};
+
+export function gameStateLabel(raw: string | undefined): string {
+  return raw ? (GAME_STATE_LABELS[raw] ?? "") : "";
+}
+
 export function summariseLog(file: string): LogSummary {
   const lines = readTail(file, 400);
   const summary: LogSummary = {};

@@ -28,13 +28,13 @@ export const ANNOUNCE_FIELDS: (keyof Announcement)[] = ["kind", "tag", "text", "
 
 /** Chinese labels for the form rows; the schema names stay visible next to them. */
 export const ANNOUNCE_FIELD_LABELS: Record<keyof Announcement, string> = {
-  kind: "kind    种类",
-  tag: "tag     前缀",
-  text: "text    文案",
-  color: "color   颜色",
-  sustain: "sustain 停留秒",
-  fade: "fade    淡出秒",
-  wait: "wait    间隔秒",
+  kind: "种类",
+  tag: "前缀",
+  text: "文案",
+  color: "颜色",
+  sustain: "停留",
+  fade: "淡出",
+  wait: "间隔",
 };
 
 /** `color` values the engine documents in the CSV header (blank = 默认). */
@@ -247,11 +247,11 @@ function confirmKey(ui: UiState, ev: KeyEvent, dialog: Extract<DialogState, { ki
     return dialog.kind === "ban"
       ? {
           ui: { ...ui, dialog: null },
-          run: { args: ["ban", target.userid], label: `封禁 ${target.name}（ban "${target.userid}"）` },
+          run: { args: ["ban", target.userid], label: `封禁 ${target.name}` },
         }
       : {
           ui: { ...ui, dialog: null },
-          run: { args: ["unban", target.uniqueid], label: `解封 ${target.uniqueid}（unban "${target.uniqueid}"）` },
+          run: { args: ["unban", target.uniqueid], label: `解封 ${target.name}（账号 ${target.uniqueid}）` },
         };
   }
   return { ui };
@@ -288,21 +288,29 @@ function announceFormKey(ui: UiState, ev: KeyEvent, dialog: Extract<DialogState,
 
 // ------------------------------------------------------------ settings page
 
+/** `x` on the map row: change level right now (console `changelevel <map>`). */
+function switchMap(ui: UiState, ctx: RouteContext): RouteOutcome {
+  const map = ctx.settingsValues.map.trim();
+  if (map.length === 0) return { ui, notice: "先在「地图」里选一张图，再按 x 立即换图" };
+  if (!ctx.running) return { ui, notice: "服务器未运行：换图只能对运行中的实例执行，先按 s 启动" };
+  return { ui, run: { args: ["console", `changelevel ${map}`], label: `立即换图：${map}` } };
+}
+
 /** `x`: apply the selected playlist with `bridge_setmode` (运行期命令). */
 function switchMode(ui: UiState, ctx: RouteContext): RouteOutcome {
   const playlist = ctx.settingsValues.playlist.trim();
   const map = ctx.settingsValues.map.trim();
   if (playlist.length === 0) {
-    return { ui, notice: "先在「模式（playlist）」里选一个模式，再按 x 立即切换" };
+    return { ui, notice: "先在「模式」里选一个玩法，再按 x 立即切换" };
   }
   if (!ctx.running) {
-    return { ui, notice: "服务器未运行：bridge_setmode 只能在运行中热切，先按 s 启动" };
+    return { ui, notice: "服务器未运行：模式只能在运行中切换，先按 s 启动" };
   }
   // Only pass a map the chosen playlist actually ships; otherwise let the CLI
   // fall back to the mode's own default map.
   const known = ctx.playlistMaps.length > 0 && ctx.playlistMaps.includes(map);
   const args = known ? ["mode", "set", playlist, map] : ["mode", "set", playlist];
-  return { ui, run: { args, label: `立即切换模式：${playlist}${known ? ` / ${map}` : "（模式默认地图）"}` } };
+  return { ui, run: { args, label: `立即切换模式：${playlist}${known ? ` ${map}` : "（用该模式默认地图）"}` } };
 }
 
 export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOutcome {
@@ -344,8 +352,8 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
     if (ev.home) return { ui: { ...ui, playerCursor: 0 } };
     if (ev.end) return { ui: { ...ui, playerCursor: Math.max(0, count - 1) } };
     if (ev.input === "r") return { ui, reload: true };
-    if (ev.input === "+") return { ui, run: { args: ["bots", "add"], label: "加 1 个机器人（spawnbots 1）" } };
-    if (ev.input === "c") return { ui, run: { args: ["bots", "clear"], label: "清空机器人（逐个 kick）" } };
+    if (ev.input === "+") return { ui, run: { args: ["bots", "add"], label: "加 1 个机器人" } };
+    if (ev.input === "c") return { ui, run: { args: ["bots", "clear"], label: "清空全部机器人" } };
     if (ev.input === "-") {
       const bots = ctx.players.filter((player) => player.bot);
       if (bots.length === 0) return { ui, notice: "当前没有机器人可减（按 + 先加一个）" };
@@ -354,13 +362,13 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
       // 清空 + 重建 N-1 个，动作说明写在输出里。
       const remaining = bots.length - 1;
       if (remaining === 0) {
-        return { ui, run: { args: ["bots", "clear"], label: "减 1 个机器人（最后一个：bots clear）" } };
+        return { ui, run: { args: ["bots", "clear"], label: "减 1 个机器人" } };
       }
       return {
         ui,
         run: {
           args: ["bots", "clear"],
-          label: `减 1 个机器人（kick 对机器人无效，改为清空后重建 ${remaining} 个）`,
+          label: `减 1 个机器人（重建剩下的 ${remaining} 个）`,
           next: {
             args: ["bots", "add", "--count", String(remaining)],
             label: `重建 ${remaining} 个机器人`,
@@ -370,8 +378,7 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
     }
     const player = ctx.players[ui.playerCursor];
     if (player) {
-      if (ev.input === "k")
-        return { ui, run: { args: ["kick", player.userid], label: `踢出 ${player.name}（userid ${player.userid}）` } };
+      if (ev.input === "k") return { ui, run: { args: ["kick", player.userid], label: `踢出 ${player.name}` } };
       if (ev.input === "b") return { ui: { ...ui, dialog: { kind: "ban", target: player } } };
       if (ev.input === "u") return { ui: { ...ui, dialog: { kind: "unban", target: player } } };
     }
@@ -384,7 +391,7 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
       return {
         ui,
         reload: true,
-        run: { args: ["banlist", "--reload"], label: "重载封禁名单（banlist_reload）" },
+        run: { args: ["banlist", "--reload"], label: "重新加载封禁名单" },
       };
     }
     if (ev.up) return { ui: scrollPage(ui, -1, ctx.banLineCount, ctx.banRows) };
@@ -399,7 +406,7 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
   if (ui.route === "announce") {
     if (ev.escape) return { ui: { ...ui, route: "main", annCursor: 0, annScroll: 0 } };
     if (ev.input === "r") return { ui, reload: true };
-    if (ev.input === "t") return { ui, run: { args: ["announce"], label: "触发公告广播（bridge_chat_announce）" } };
+    if (ev.input === "t") return { ui, run: { args: ["announce"], label: "广播公告" } };
     if (ev.input === "a") {
       const form: AnnounceForm = {
         field: 0,
@@ -442,6 +449,7 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
   if (ui.route === "settings") {
     const field = ctx.settingsFields[ui.edit.cursor];
     if (ev.input === "x" && ui.edit.mode === "browse" && field?.id === "playlist") return switchMode(ui, ctx);
+    if (ev.input === "x" && ui.edit.mode === "browse" && field?.id === "map") return switchMap(ui, ctx);
     const outcome = settingsKey(ui.edit, ev, {
       fields: ctx.settingsFields,
       values: ctx.settingsValues,

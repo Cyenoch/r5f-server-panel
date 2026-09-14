@@ -11,7 +11,7 @@
  * back — to the same route.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Announcement, type AnnouncementsFile, collectAnnouncements, validateAnnouncement } from "./announcements";
@@ -42,7 +42,7 @@ import {
   initialUi,
   routeKey,
 } from "./keys";
-import { formatUptime, parseServerTitle, summariseLog } from "./serverinfo";
+import { formatUptime, gameStateLabel, parseServerTitle, summariseLog } from "./serverinfo";
 import { SETTINGS_FIELDS, type FieldDef, type FieldId, fieldById } from "./settings-fields";
 import { ROOT, defaultSettings, loadState, type State } from "./state";
 import { isPidAlive, readTail, stripAnsi } from "./tap";
@@ -74,6 +74,29 @@ type Snapshot = {
  * Newest `logs/<版本>-<端口>-<时间戳>.log` shard (ticket 04: every run writes its
  * own shard, so the run id lives in the file name).
  */
+/** 地图 stem → 版本清单里的人类名字；不认识就原样显示。 */
+function mapDisplay(catalog: Catalog, stem: string): string {
+  return catalog.maps.find((entry) => entry.stem === stem)?.label ?? stem;
+}
+
+/** 公告颜色值 → 中文（未知值原样显示，例如自定义的 255 80 80）。 */
+const ANNOUNCE_COLOR_LABELS: Record<string, string> = {
+  white: "白",
+  red: "红",
+  gold: "金",
+  green: "绿",
+  cyan: "青",
+  rainbow: "彩虹",
+};
+
+/** 引擎的玩家状态值 → 中文；未知值原样显示，不做猜测。 */
+const PLAYER_STATE_LABELS: Record<string, string> = {
+  active: "在线",
+  connecting: "连接中",
+  spawning: "进入中",
+  zombie: "掉线中",
+};
+
 function newestShard(version: string, port: number): string {
   if (version.length === 0) return "";
   const dir = join(ROOT, "logs");
@@ -303,10 +326,10 @@ function usePageData(route: Route, reloadKey: number, state: State): PageData {
           ]);
           const notes = [...problems];
           if (!health.latestOk) {
-            notes.push("本次运行日志：读不到 platform/logs/server/latest.txt（引擎可能还没写过日志）");
+            notes.push("本次运行记录：还读不到（引擎可能还没写过）");
           }
           if (health.error.exists && health.error.bytes > 0) {
-            notes.push(`本次运行 error.log 非空（${health.error.bytes} 字节）：本次运行出现过错误`);
+            notes.push(`错误记录里有内容（${health.error.bytes} 字节）：本次运行出过问题`);
           }
           if (!cancelled) setData({ key, sections, problems: notes, health });
           return;
@@ -492,11 +515,11 @@ function useBanlist(
             key,
             path: "",
             lines: [
-              "版本目录根、platform/、platform/cfg/ 三处都没有 banlist.json。",
-              "引擎只在真正写入过封禁后才会创建它（实测至今未出现）；机器人不可封禁，所以它不会凭空出现。",
-              "按 r 会先发送 banlist_reload 让引擎热载名单，再重新读文件。",
+              "本机还没有封禁名单文件。",
+              "服务器只在真正记录过一次封禁之后才生成它；机器人不会被封禁，所以不会出现在这里。",
+              "按 r 重新读取（服务器会同时重新加载名单）。",
             ],
-            note: "未找到 banlist.json",
+            note: "还没有名单文件",
           });
         }
         return;
@@ -607,42 +630,28 @@ function sectionLines(sections: Section[], labelWidth: number, width: number): L
  * prefix — those lines carry normal boot output as well.
  */
 function healthSection(health: Health, statsUpload: string): Section {
-  const rows: Section["rows"] = [
-    {
-      label: "运行 id",
-      value: health.runId || "(读不到 platform/logs/server/latest.txt)",
-      tone: health.runId ? undefined : "yellow",
-    },
-    { label: "运行目录", value: health.runDir || "(未知)" },
-  ];
+  const rows: Section["rows"] = [];
   if (!health.error.exists) {
-    rows.push({ label: "error.log", value: "不存在（引擎本次还没写过）", tone: "yellow" });
+    rows.push({ label: "错误记录", value: "还没有记录", tone: "yellow" });
   } else if (health.error.bytes > 0) {
-    const first = health.error.lines.find((line) => line.trim().length > 0) ?? "";
-    rows.push({
-      label: "error.log",
-      value: `非空（${kb(health.error.bytes)}）：${first}`,
-      tone: "red",
-    });
+    rows.push({ label: "错误记录", value: `有内容（${kb(health.error.bytes)}）—— 本次运行出过问题`, tone: "red" });
   } else {
-    rows.push({ label: "error.log", value: "空（本次运行没有错误）", tone: "green" });
+    rows.push({ label: "错误记录", value: "空的 —— 本次运行没有出错", tone: "green" });
   }
   rows.push({
-    label: "warning.log",
-    value: health.warning.exists
-      ? `${kb(health.warning.bytes)} · 尾部 ${health.warning.lines.length} 行（启动诊断，非错误）`
-      : "不存在",
+    label: "启动记录",
+    value: health.warning.exists ? `${kb(health.warning.bytes)}（启动自检的正常输出，不是错误）` : "无",
   });
   rows.push({
-    label: "script_warning.log",
+    label: "脚本告警",
     value: health.scriptWarning.exists
       ? health.scriptWarning.bytes > 0
         ? `有内容（${kb(health.scriptWarning.bytes)}）`
-        : "空"
-      : "不存在",
+        : "空的"
+      : "无",
   });
   rows.push({ label: "对外上报", value: statsUpload });
-  return { title: "本次运行（引擎自己的日志目录）", rows };
+  return { title: "本次运行", rows };
 }
 
 // ------------------------------------------------------------ settings page
@@ -813,13 +822,13 @@ function TargetDialog({
   type DialogLine = { text: string; tone?: "yellow" | "red" | "cyan"; bold?: boolean };
   const subject: DialogLine[] = [
     { text: `目标    ${target.name}`, bold: true },
-    { text: `userid  ${target.userid}` },
-    { text: `id64    ${target.uniqueid || "(无)"}` },
+    { text: `编号    ${target.userid}` },
+    { text: `账号 ID ${target.uniqueid || "(无)"}` },
   ];
   const botHint: DialogLine[] = target.bot
     ? [
         {
-          text: "注意：这是机器人（uniqueid=0）。实测引擎忽略对机器人的 ban/banid，命令会发出去但没有效果。",
+          text: "注意：这是机器人。服务器会忽略对机器人的封禁命令，发出去也没有效果。",
           tone: "yellow" as const,
         },
       ]
@@ -829,17 +838,13 @@ function TargetDialog({
       ? [
           ...subject,
           ...botHint,
-          { text: `本地封禁命令 ban "${target.userid}"；引擎无回执，时长/原因不可用（属 Spire 侧）。` },
-          { text: "回车后命令输出会进日志区，结果无法从本地确认。" },
+          { text: "只在本机生效；服务器不会回执，时长与原因暂不支持。" },
+          { text: "执行结果无法在本机确认（需要真人玩家进服验证）。" },
         ]
-      : [
-          ...subject,
-          ...botHint,
-          { text: `本地解封命令 unban "${target.uniqueid || "<id64>"}"；引擎无回执，结果无法从本地确认。` },
-        ];
+      : [...subject, ...botHint, { text: "按账号 ID 解封；服务器不会回执，结果需要真人玩家验证。" }];
   const lines: DialogLine[] = [
     {
-      text: action === "ban" ? "封禁确认（本地控制台命令）" : "解封确认（本地控制台命令）",
+      text: action === "ban" ? "封禁确认" : "解封确认",
       tone: "cyan",
       bold: true,
     },
@@ -874,22 +879,22 @@ function AnnounceDialog({
   const errors = validateAnnouncement(announcementRow(form));
   const focused = ANNOUNCE_FIELDS[Math.min(Math.max(0, form.field), ANNOUNCE_FIELDS.length - 1)];
   const hints: Record<keyof Announcement, string> = {
-    kind: "rotate 轮播 / welcome 进场（← → 切换）",
+    kind: "轮播（定期播报）/ 进场（玩家进入时播报），← → 切换",
     tag: "前缀，如 [Flowstate]；留空 = 无",
     text: "文案，最长 64 字符（含逗号也可以，写文件时会自动加引号）",
-    color: "white/red/gold/green/cyan/rainbow/255 80 80；留空 = 默认",
+    color: "白 red / 金 gold / 绿 green / 青 cyan / 彩虹 rainbow，也可自定义 RGB；留空 = 默认",
     sustain: "完全可见秒数，留空 = 8",
     fade: "淡出秒数，留空 = 2",
-    wait: "间隔秒数，留空 = 60（welcome 为 10）",
+    wait: "间隔秒数，留空 = 60（进场为 10）",
   };
 
   type DialogLine = { text: string; tone?: "yellow" | "red" | "cyan"; bold?: boolean };
-  const head: DialogLine = { text: "新增公告（chat_announcements.csv）", tone: "cyan", bold: true };
+  const head: DialogLine = { text: "新增公告", tone: "cyan", bold: true };
   const rowsOf: DialogLine[] = ANNOUNCE_FIELDS.map((key) => {
     const active = key === focused;
     const value = form[key];
     return {
-      text: `${active ? "❯" : " "} ${padEndWidth(ANNOUNCE_FIELD_LABELS[key], 14)}${fitLine(value.length > 0 ? value : "(空)", Math.max(8, inner - 20))}`,
+      text: `${active ? "❯" : " "} ${padEndWidth(ANNOUNCE_FIELD_LABELS[key], 8)}${fitLine(value.length > 0 ? value : "(空)", Math.max(8, inner - 14))}`,
       tone: active ? ("cyan" as const) : undefined,
       bold: active,
     };
@@ -903,7 +908,7 @@ function AnnounceDialog({
     ...rowsOf,
     { text: hints[focused] },
     ...feedback,
-    { text: "↑↓ 换字段 · ←→ 切换 kind/color · 回车 保存 · Esc 取消" },
+    { text: "↑↓ 换字段 · ←→ 切换种类/颜色 · 回车 保存 · Esc 取消" },
   ];
   const height = Math.min(lines.length + 2, Math.max(8, rows - 6));
 
@@ -1127,8 +1132,6 @@ export function Dashboard({
   const metrics = proc ? parseServerTitle(proc.title) : {};
   const logFile = snap.logPath || s.runtime?.logFile;
   const logExists = Boolean(logFile && existsSync(logFile));
-  /** Shard name of the log being followed: `logs/<版本>-<端口>-<runid>.log`. */
-  const logShard = logFile ? `logs/${basename(logFile)}` : "";
   const summary = logFile && existsSync(logFile) ? summariseLog(logFile) : {};
   const ports = proc ? gameplayPorts(snap.ports, settings.port) : { configured: [], other: [] };
   const stale = Boolean(s.runtime?.pid) && !proc;
@@ -1136,15 +1139,13 @@ export function Dashboard({
   const secondsAgo = Math.max(0, Math.round((now - snap.refreshedAt) / 1000));
 
   // ---- page content --------------------------------------------------------
-  // The doctor page carries the health block, whose labels are the app's
-  // longest (`script_warning.log`), so its label column is wider.
   const pageLines =
     view.route === "detail" || view.route === "doctor"
       ? sectionLines(
           page.health
             ? [healthSection(page.health, fieldById("statsUpload").display(settings)), ...page.sections]
             : page.sections,
-          view.route === "doctor" ? 19 : 12,
+          12,
           columns - 6,
         )
       : [];
@@ -1160,15 +1161,20 @@ export function Dashboard({
     catalog.modes.flatMap((family) => family.modes),
     settings.playlist,
   );
-  /** `fs_1v1（1v1 · FS 1v1）` — the setting row only carries the id otherwise. */
-  let playlistSuffix = "";
-  for (const family of catalog.modes) {
-    const mode = family.modes.find((entry) => entry.id === settings.playlist);
-    if (!mode) continue;
-    const note = mode.title === family.title ? family.title : `${family.title} · ${mode.title}`;
-    if (!fieldById("playlist").display(settings).includes(note)) playlistSuffix = `（${note}）`;
-    break;
-  }
+  /** 选中模式的家族·标题（`1v1 · FS 1v1`）；不是已知模式时为空。 */
+  const playlistNote = (() => {
+    for (const family of catalog.modes) {
+      const mode = family.modes.find((entry) => entry.id === settings.playlist);
+      if (!mode) continue;
+      return mode.title === family.title ? family.title : `${family.title} · ${mode.title}`;
+    }
+    return "";
+  })();
+  /** 设置行只显示 id，所以补一个 `（1v1 · FS 1v1）` 后缀。 */
+  const playlistSuffix =
+    playlistNote.length > 0 && !fieldById("playlist").display(settings).includes(playlistNote)
+      ? `（${playlistNote}）`
+      : "";
 
   // ---- console stream ------------------------------------------------------
   const combined: { text: string; kind: "game" | "head" | "out" | "error" }[] = [
@@ -1278,7 +1284,7 @@ export function Dashboard({
       : view.route === "players"
         ? "↑↓ 选择玩家 · k 踢出 · b 封禁 · u 解封 · + 加机器人 · - 减 1 个 · c 清空 · r 刷新 · : 控制台 · Esc 返回 · q 退出"
         : view.route === "banlist"
-          ? "↑↓/PgUp/PgDn 滚动 · Home/End 首尾 · r 刷新（先 banlist_reload 再重读文件）· Esc 返回 · q 退出"
+          ? "↑↓/PgUp/PgDn 滚动 · Home/End 首尾 · r 重新读取 · Esc 返回 · q 退出"
           : view.route === "announce"
             ? "↑↓ 选择 · a 新增 · d 删除选中 · t 广播 · r 重新读取 · Esc 返回 · q 退出"
             : view.route === "settings"
@@ -1339,7 +1345,7 @@ export function Dashboard({
         </Text>
         <Text wrap="truncate">
           <Text dimColor>默认启动 </Text>
-          <Text>{`UDP ${settings.port} · 地图 ${settings.map || "未设置"} · 模式 ${settings.playlist || "由玩家选择"} · 可见性 ${settings.visibility === 0 ? "离线" : settings.visibility === 1 ? "隐藏" : "公开"}`}</Text>
+          <Text>{`UDP ${settings.port} · 地图 ${settings.map ? mapDisplay(catalog, settings.map) : "未设置"} · 模式 ${playlistNote || settings.playlist || "由玩家选择"} · 可见性 ${settings.visibility === 0 ? "离线" : settings.visibility === 1 ? "隐藏" : "公开"}`}</Text>
         </Text>
       </Box>
 
@@ -1392,18 +1398,18 @@ export function Dashboard({
               {proc ? (
                 <>
                   <Field
-                    label="进程"
-                    value={`pid ${proc.pid}   运行 ${formatUptime(s.runtime?.startedAt ?? "", proc.startedAt, true) || "—"}`}
+                    label="运行"
+                    value={formatUptime(s.runtime?.startedAt ?? "", proc.startedAt, true) || "—"}
                     width={columns - 4 - Math.max(28, Math.round((columns - 2) * 0.42))}
                   />
                   <Field
                     label="地图"
                     value={
                       metrics.map
-                        ? `${metrics.map}${metrics.playlist ? `  (${metrics.playlist})` : ""}`
+                        ? mapDisplay(catalog, metrics.map)
                         : summary.mapInit
-                          ? `${summary.mapInit}${summary.gameState ? `  ${summary.gameState}` : ""}`
-                          : summary.gameState || "加载中…"
+                          ? `${summary.mapInit}${gameStateLabel(summary.gameState) ? `  ${gameStateLabel(summary.gameState)}` : ""}`
+                          : gameStateLabel(summary.gameState) || "加载中…"
                     }
                     width={columns - 4 - Math.max(28, Math.round((columns - 2) * 0.42))}
                   />
@@ -1441,13 +1447,7 @@ export function Dashboard({
               )}
               <Field
                 label="日志"
-                value={
-                  daemonAlive
-                    ? `运行中 (pid ${s.runtime?.logdPid})`
-                    : logFile
-                      ? "未运行（日志已停止更新）"
-                      : "未启用托管控制台"
-                }
+                value={daemonAlive ? "运行中" : logFile ? "未运行（日志已停止更新）" : "未启用托管控制台"}
                 tone={daemonAlive ? "green" : undefined}
                 width={columns - 4 - Math.max(28, Math.round((columns - 2) * 0.42))}
               />
@@ -1474,7 +1474,7 @@ export function Dashboard({
               {view.scroll > 0 ? <Text color="yellow">{`   ↑ 已回溯 ${view.scroll} 行（End 回到最新）`}</Text> : null}
               {logFile ? (
                 <Text dimColor>
-                  {`   ${proc ? "本次运行" : "（上次运行）"} ${truncate(logShard, Math.max(16, columns - 74))}${logExists ? "" : "（等待引擎写入…）"}`}
+                  {`   ${proc ? "本次运行" : "（上次运行）"}${logExists ? " · 实时更新" : "（等待引擎写入…）"}`}
                 </Text>
               ) : null}
             </Text>
@@ -1579,11 +1579,12 @@ export function Dashboard({
                   <Text
                     dimColor
                     wrap="truncate"
-                  >{`  ${padEndWidth("#", 4)}${padEndWidth("userid", 8)}${padEndWidth("id64", 19)}${padEndWidth("ping", 6)}${padEndWidth("状态", 12)}名字`}</Text>
+                  >{`  ${padEndWidth("#", 4)}${padEndWidth("名字", 22)}${padEndWidth("编号", 6)}${padEndWidth("延迟", 6)}${padEndWidth("状态", 12)}`}</Text>
                   {playersData.players.map((player, index) => {
                     const selected = index === view.playerCursor;
                     const bot = player.uniqueid === "0";
-                    const line = `${padEndWidth(selected ? "❯" : " ", 4)}${padEndWidth(player.userid, 8)}${padEndWidth(player.uniqueid, 19)}${padEndWidth(player.ping, 6)}${padEndWidth(player.state, 12)}${player.name}`;
+                    const state = PLAYER_STATE_LABELS[player.state] ?? player.state;
+                    const line = `${padEndWidth(selected ? "❯" : " ", 4)}${padEndWidth(player.name, 22)}${padEndWidth(player.userid, 6)}${padEndWidth(player.ping, 6)}${padEndWidth(state, 12)}`;
                     return (
                       <Text key={player.userid} color={selected ? "cyan" : undefined} bold={selected} wrap="truncate">
                         {truncate(`  ${line}`, columns - 8)}
@@ -1594,9 +1595,7 @@ export function Dashboard({
                 </>
               )}
               <Text dimColor wrap="truncate">
-                {
-                  "  k 踢出 · b 封禁（先确认；引擎无回执）· u 解封（id64）· + 加 1 个机器人 · - 减 1 个 · c 清空机器人 · : 控制台"
-                }
+                {"  k 踢出 · b 封禁（先确认）· u 解封 · + 加 1 个机器人 · - 减 1 个 · c 清空机器人 · : 控制台"}
               </Text>
               {notice ? (
                 <Text
@@ -1611,11 +1610,8 @@ export function Dashboard({
                 <Text bold color="cyan">
                   封禁名单
                 </Text>
-                <Text dimColor>{`   本地 banlist.json · ${banlist.loading ? "读取中…" : banlist.note}`}</Text>
+                <Text dimColor>{`   本机封禁名单 · ${banlist.loading ? "读取中…" : banlist.note}`}</Text>
               </Text>
-              {banlist.path ? (
-                <Text dimColor wrap="truncate">{`  文件：${truncate(banlist.path, columns - 12)}`}</Text>
-              ) : null}
               {banSlice.map((line, index) => (
                 <Text key={`${view.pageScroll + index}`} wrap="truncate">
                   {`  ${truncate(line, columns - 8)}`}
@@ -1623,9 +1619,7 @@ export function Dashboard({
               ))}
               {banlist.lines.length === 0 && !banlist.loading ? <Text dimColor>{"  （没有可显示的内容）"}</Text> : null}
               <Text dimColor wrap="truncate">
-                {
-                  "  r 会先发送 banlist_reload（引擎热载名单，无回执）再重新读文件 · 机器人不可封禁，所以名单里不会出现它们"
-                }
+                {"  r 重新读取（服务器会同时重新加载名单）· 机器人不会被封禁，所以不会出现在名单里"}
               </Text>
               {banMaxScroll > 0 ? (
                 <Text dimColor>{`  （已滚动到第 ${view.pageScroll + 1} 行 / 共 ${banlist.lines.length} 行）`}</Text>
@@ -1644,7 +1638,7 @@ export function Dashboard({
                   公告
                 </Text>
                 <Text dimColor>
-                  {`   ${annCount} 条 · ${announcementsData.loading ? "读取中…" : "platform/datatable/chat_announcements.csv"}`}
+                  {`   ${annCount} 条 · ${announcementsData.loading ? "读取中…" : "本机公告文案表"}`}
                 </Text>
               </Text>
               <Text dimColor wrap="truncate">
@@ -1658,8 +1652,10 @@ export function Dashboard({
                 .map((row, index) => {
                   const absolute = view.annScroll + index;
                   const selected = absolute === view.annCursor;
-                  const tail = `${row.color || "默认色"} · 停留 ${row.sustain || 8}s · 淡出 ${row.fade || 2}s · 间隔 ${row.wait || (row.kind === "rotate" ? 60 : 10)}s`;
-                  const head = `${selected ? "❯" : " "} ${padEndWidth(row.kind, 8)}${padEndWidth(truncate(row.tag || "-", 14), 14)}${truncate(row.text, Math.max(12, columns - 78))}`;
+                  const kindLabel = row.kind === "welcome" ? "进场" : "轮播";
+                  const colorLabel = row.color.length > 0 ? (ANNOUNCE_COLOR_LABELS[row.color] ?? row.color) : "默认色";
+                  const tail = `${colorLabel} · 停留 ${row.sustain || 8} 秒 · 淡出 ${row.fade || 2} 秒 · 间隔 ${row.wait || (row.kind === "rotate" ? 60 : 10)} 秒`;
+                  const head = `${selected ? "❯" : " "} ${padEndWidth(kindLabel, 8)}${padEndWidth(truncate(row.tag || "-", 14), 14)}${truncate(row.text, Math.max(12, columns - 78))}`;
                   return (
                     <Text
                       key={`${row.kind}-${absolute}`}
@@ -1675,7 +1671,7 @@ export function Dashboard({
                 <Text dimColor>{"  没有解析到公告行（文件可能只有注释与表头）。按 a 新增一条。"}</Text>
               ) : null}
               <Text dimColor wrap="truncate">
-                {"  改动在 changelevel 或重启后生效（引擎文件头自述）· t 触发广播：引擎无回执，效果需真人在场确认"}
+                {"  改动在换图或重启后生效 · t 立即广播（是否弹给玩家需真人在场确认）"}
               </Text>
               {notice ? (
                 <Text
@@ -1712,12 +1708,12 @@ export function Dashboard({
               </Text>
               {selectedField.id === "map" && snap.proc ? (
                 <Text dimColor wrap="truncate">
-                  {`  立即换图（不重启、不掉人）：: changelevel ${settings.map || "<stem>"}`}
+                  {`  x 立即换到这张地图（不重启、不掉人）`}
                 </Text>
               ) : null}
               {selectedField.id === "playlist" ? (
                 <Text dimColor wrap="truncate">
-                  {`  x 立即切换模式（bridge_setmode，运行中生效）${playlistMaps.length > 0 ? ` · 该模式 ${playlistMaps.length} 张图` : ""}`}
+                  {`  x 立即切换到这个模式（运行中生效）${playlistMaps.length > 0 ? ` · 该模式有 ${playlistMaps.length} 张图` : ""}`}
                 </Text>
               ) : null}
               {selectedCfg.length > 0 ? (

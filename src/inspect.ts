@@ -11,6 +11,7 @@ import {
   currentVersion,
   describe,
   formatUptime,
+  gameStateLabel,
   parseServerTitle,
   summariseLog,
 } from "./serverinfo";
@@ -126,11 +127,11 @@ function liveInstanceRows(state: State, proc: win.ProcInfo, ports: string[]): Ro
   const rows: Row[] = [];
   rows.push({
     label: "进程",
-    value: `pid ${proc.pid}${proc.startedAt ? `  启动于 ${proc.startedAt}` : ""}`,
+    value: proc.startedAt ? `启动于 ${proc.startedAt}` : "运行中",
   });
   const uptime = formatUptime(state.runtime?.startedAt ?? "", proc.startedAt);
   if (uptime) rows.push({ label: "运行时长", value: uptime });
-  if (metrics.players) rows.push({ label: "人数", value: `${metrics.players}  (${metrics.playlist ?? "-"})` });
+  if (metrics.players) rows.push({ label: "人数", value: metrics.players });
   if (metrics.map) rows.push({ label: "当前地图", value: metrics.map });
   if (metrics.cpuPercent) rows.push({ label: "服务端 CPU", value: `${metrics.cpuPercent}%` });
   if (metrics.frameMs) rows.push({ label: "帧耗时", value: `${metrics.frameMs} msec  帧号 ${metrics.frame ?? "-"}` });
@@ -149,38 +150,31 @@ function logRows(state: State, metrics: ServerMetrics): Row[] {
   if (logFile && existsSync(logFile)) {
     const summary = summariseLog(logFile);
     if (!metrics.players) {
-      if (summary.gameState) rows.push({ label: "游戏状态", value: summary.gameState });
+      const stateLabel = gameStateLabel(summary.gameState);
+      if (stateLabel.length > 0) rows.push({ label: "游戏状态", value: stateLabel });
       if (summary.mapInit) rows.push({ label: "已加载地图", value: summary.mapInit });
     }
     const size = statSync(logFile).size;
     rows.push({
-      label: "文件",
-      value: `${logFile}  (${(size / 1024).toFixed(0)} KB, 最后 [${summary.lastStamp ?? "?"}]s)`,
+      label: "日志",
+      value: `${Math.max(1, Math.round(size / 1024))} KB · 已写入到 ${summary.lastStamp ?? "?"} 秒`,
     });
-    if (summary.lastLine) {
-      rows.push({
-        label: "最后一行",
-        value: summary.lastLine.length > 120 ? `${summary.lastLine.slice(0, 120)}…` : summary.lastLine,
-      });
-    }
   } else if (logFile) {
-    rows.push({ label: "文件", value: `${logFile}（尚未生成）` });
+    rows.push({ label: "日志", value: "尚未生成" });
   } else {
-    rows.push({ label: "文件", value: "未启用托管控制台", tone: "yellow" });
+    rows.push({ label: "日志", value: "未启用托管控制台", tone: "yellow" });
   }
   const daemon = state.runtime?.logdPid ?? 0;
   rows.push({
-    label: "日志守护",
-    value: isPidAlive(daemon) ? `pid ${daemon} 运行中` : daemon ? "未运行（日志不再更新）" : "未启动",
+    label: "日志记录",
+    value: isPidAlive(daemon) ? "运行中" : daemon ? "已停止（日志不再更新）" : "未启动",
     tone: isPidAlive(daemon) ? "green" : "yellow",
   });
   const ctlPort = state.runtime?.ctlPort ?? 0;
   rows.push({
-    label: "控制通道",
+    label: "远程管理",
     value:
-      ctlPort > 0 && isPidAlive(daemon)
-        ? `127.0.0.1:${ctlPort}（可 players / console / kick / ban）`
-        : "不可用（需托管控制台启动）",
+      ctlPort > 0 && isPidAlive(daemon) ? "可用（查在线玩家 · 踢人 · 封禁 · 公告）" : "不可用（需要以托管方式启动）",
     tone: ctlPort > 0 && isPidAlive(daemon) ? "green" : "yellow",
   });
   return rows;
@@ -211,12 +205,12 @@ function hostRows(facts: HostFacts | null, state: State): Row[] {
       value:
         facts.firewallMissing.length === 0
           ? `已放行 ${port}`
-          : `缺少 UDP ${facts.firewallMissing.join(", ")} → 运行 setup`,
+          : `缺少放行（UDP ${facts.firewallMissing.join(", ")}）→ 在「主机配置」按回车应用`,
       tone: facts.firewallMissing.length === 0 ? "green" : "red",
     },
     {
       label: "Defender",
-      value: facts.defenderExcluded ? "已排除根目录" : "未排除（可能误杀 loader.dll）",
+      value: facts.defenderExcluded ? "已排除根目录" : "未排除（可能导致服务端文件被误删）",
       tone: facts.defenderExcluded ? "green" : "yellow",
     },
     {
@@ -253,11 +247,11 @@ export async function collectDetail(state: State): Promise<Section[]> {
         tone: version ? "green" : "red",
       },
       {
-        label: "启动参数",
-        value: `port=${s.port} map=${s.map || "-"} playlist=${s.playlist || "-"} visibility=${s.visibility} auth=${s.authMode}${s.password ? " password=已设置" : ""}`,
+        label: "启动设置",
+        value: `UDP ${s.port} · 地图 ${s.map || "未指定"} · 模式 ${s.playlist || "未指定"} · 可见性 ${s.visibility === 0 ? "离线" : s.visibility === 1 ? "隐藏" : "公开"} · 认证 ${s.authMode === 0 ? "关闭" : s.authMode === 1 ? "强制校验" : "有就校验"}${s.password ? " · 有密码" : ""}`,
       },
       { label: "主机名", value: s.hostname || "(空)" },
-      { label: "配额", value: `${s.quotaString} string/s, ${s.quotaScript} script/s` },
+      { label: "配额", value: `${s.quotaString} 条命令/秒 · ${s.quotaScript} 个脚本/秒` },
       { label: "附加参数", value: s.extra || "(空)" },
     ],
   });
@@ -268,7 +262,7 @@ export async function collectDetail(state: State): Promise<Section[]> {
   } else {
     for (const proc of procs) {
       const ports = await win.udpEndpointsAsync(proc.pid);
-      sections.push({ title: `实例 pid ${proc.pid}`, rows: liveInstanceRows(state, proc, ports) });
+      sections.push({ title: "实例", rows: liveInstanceRows(state, proc, ports) });
     }
   }
 
@@ -359,27 +353,25 @@ export async function collectHealth(state: State): Promise<Health> {
 
   const notes: string[] = [];
   if (!version) {
-    notes.push("未选择版本目录：找不到 platform/logs/server。");
+    notes.push("还没有选择版本，读不到运行记录。");
   } else if (latestPath.length === 0 || !existsSync(latestPath)) {
-    notes.push("latest.txt 缺失：引擎还没写过运行日志目录（实例从未启动过？）。");
+    notes.push("还没有运行记录（这个实例从没启动过？）。");
   } else if (runId.length === 0) {
-    notes.push("latest.txt 是空的：读不到本次运行的目录名。");
+    notes.push("读不到本次运行的记录目录。");
   } else if (!latestOk) {
     notes.push(`latest.txt 指向的目录不存在：${runDir}`);
   }
   if (latestOk) {
     if (error.bytes > 0) {
-      notes.push(`error.log 非空（${error.bytes} 字节）：本次运行记录了错误，见上面几行。`);
+      notes.push(`错误记录里有内容（${error.bytes} 字节）：本次运行出过问题，原文用 r5-server health 查看。`);
     } else {
-      notes.push("error.log 为空：本次运行没有记录错误。");
+      notes.push("错误记录是空的：本次运行没有出错。");
     }
     if (warning.bytes > 0) {
-      notes.push(
-        `warning.log ${warning.lines.length} 行：该改版启动自检的正常输出（[DETOUR]/[ZIP-ATTACH]），不是故障。`,
-      );
+      notes.push("启动记录有内容：这是改版服务端启动自检的正常输出，不是故障。");
     }
     if (scriptWarning.bytes > 0) {
-      notes.push(`script_warning.log 非空（${scriptWarning.lines.length} 行采样）：脚本侧有告警。`);
+      notes.push("脚本侧有告警（不影响启动，需要时用 r5-server health 看原文）。");
     }
   }
   return { runId, runDir, latestOk, error, warning, scriptWarning, notes };
@@ -397,7 +389,7 @@ export async function collectDoctor(state: State): Promise<{ sections: Section[]
     problems.push("页面文件偏小（8 GB 机器建议固定 8192 MB 起）");
   }
   if (facts && facts.firewallMissing.length > 0) problems.push("缺少 Windows 防火墙规则（主机配置页可一键放行）");
-  if (facts && !facts.defenderExcluded) problems.push("Defender 未排除根目录（可能误杀 loader.dll）");
+  if (facts && !facts.defenderExcluded) problems.push("Defender 未排除根目录（可能导致服务端文件被误删）");
   if (facts && !facts.powerHighPerformance) problems.push("电源计划非高性能（加载/换图更慢）");
   if (facts && facts.diskFreeGB > 0 && facts.diskFreeGB < 30) problems.push("磁盘剩余不足 30 GB");
   if (facts && facts.taskState.length === 0) problems.push("未配置开机自启（主机配置页可开启）");
@@ -419,7 +411,7 @@ export async function collectDoctor(state: State): Promise<{ sections: Section[]
       rows: [
         {
           label: "运行中",
-          value: procs.length === 0 ? "无" : procs.map((p) => `pid ${p.pid} (${p.workingSetMB} MB)`).join(", "),
+          value: procs.length === 0 ? "无" : procs.map((p) => `占用 ${p.workingSetMB} MB`).join("、"),
         },
       ],
     },
@@ -473,8 +465,7 @@ export async function collectCapabilities(state: State): Promise<Capability[]> {
       id: "firewall",
       label: CAPABILITY_LABELS.firewall(port),
       enabled: facts.firewallMissing.length === 0,
-      detail:
-        facts.firewallMissing.length === 0 ? `规则「R5F dedi UDP ${port}」已存在` : `缺少规则「R5F dedi UDP ${port}」`,
+      detail: facts.firewallMissing.length === 0 ? `已放行 UDP ${port}` : `未放行 UDP ${port}`,
     },
     {
       id: "pagefile",
@@ -492,8 +483,7 @@ export async function collectCapabilities(state: State): Promise<Capability[]> {
       id: "task",
       label: CAPABILITY_LABELS.task(port),
       enabled: facts.taskState.length > 0,
-      detail:
-        facts.taskState.length > 0 ? `计划任务 ${facts.taskState}${triggerLabel(facts.taskTrigger)}` : "未创建计划任务",
+      detail: facts.taskState.length > 0 ? `已配置${triggerLabel(facts.taskTrigger)}` : "未配置",
     },
     {
       id: "power",
