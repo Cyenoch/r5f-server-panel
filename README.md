@@ -1,432 +1,361 @@
-# r5-server —— R5Flowstate 专用服务器管理目录
+# r5-server —— R5Flowstate 服务器管理面板
 
-这个目录是服务器的**总目录**：CLI 本体、状态文件、日志、备份，以及一个子目录一个版本的服务端。
+管理 **R5Flowstate 专用服务端（`r5f-dedi-*`）** 的 Windows 面板程序。一个 `r5-server.exe` 同时是命令行工具和交互式面板，覆盖服务端从装好到日常运营的整条链路：版本切换、启动/停止/重启、升级与回退、主机配置、托管控制台日志、在线玩家与审核、模式与公告、环境体检。
 
-```
-r5-server\
-├─ r5-server.exe            CLI（Bun 编译的单文件，免运行时）
-├─ r5-server.json           状态：当前版本 / 启动设置 / 运行中实例 / 操作历史
-├─ start_dedi.bat           兜底脚本：不依赖 CLI，直接按默认参数拉起服务端
-├─ logs\                    每个实例一份控制台日志（托管控制台输出）
-├─ backups\                 升级前的运维配置备份（按时间戳）
-└─ r5f-dedi-1.0.11\         一个版本 = 一个目录（下面放 r5f-dedi-1.0.13 …）
-   ├─ r5apex_ds.exe         三件套，缺一不可
-   ├─ server.dll
-   ├─ loader.dll
-   ├─ platform\ paks\ vpk\ maps\ mods\ cfg\ audio\ r2\
-   └─ ...
-```
+- **面向谁**：自建 R5Flowstate 专用服的服主与运维。单机部署，不需要公网管理面。
+- **不做什么**：不是游戏本体，不含任何游戏内容（`r5apex_ds.exe` / `server.dll` / `loader.dll` / paks 都要你自己放入）；不改引擎行为，不理解成为 RCON 客户端。
 
-> 目录名随便叫什么都行，CLI 只要求它同时含 `r5apex_ds.exe` + `server.dll` + `loader.dll`；
-> 名字里带 `1.0.13` 这种版本号时，`list`/`upgrade` 会按版本号排序。
-> 本目录下 `.exe` 之外的脚本/文档均不含业务数据，删掉不影响服务端运行。
+> 与 Respawn Entertainment / Electronic Arts / R5Flowstate 官方无隶属关系，为第三方运维工具。
 
----
+## 设计取舍
 
-## 一、首次安装
+| 取舍                 | 做法                                                                     | 为什么                                                                                                                                                                               |
+| -------------------- | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **不开管理端口**     | 控制通道只监听 `127.0.0.1` 的临时端口 + 每次启动随机令牌                 | 本构建的 RCON 是自定义协议（AES-128-GCM），现成客户端连不上，且 `rcon_server.cfg` 启动时会把 `sv_rcon_password` 覆盖成空。改用引擎自带的托管控制台输入管道，等价能力，零新增 DDoS 面 |
+| **面板值优先**       | 启动前把面板设置写回**已存在**的 cvar 行（`autoexec_server.cfg` 等）     | 引擎在启动参数*之后*执行 cfg，否则 cfg 会静默覆盖你刚设的值                                                                                                                          |
+| **版本目录尽量只读** | 只写引擎自己会写的文件，和用户明确要编辑的 `chat_announcements.csv`      | 换版本时可整体丢弃，不产生需要迁移的散落改动                                                                                                                                         |
+| **静默 ≠ 成功**      | 引擎回执分 `success` / `unknown` / `usage` / `silent` 四类，逐类如实汇报 | 托管控制台没有 RCON 状态码，唯一可信信号是引擎自己的输出；"没回话"不能算"执行成功"                                                                                                   |
+| **不虚构引擎能力**   | 命令/参数必须有实测或 `server.dll` 证据；不支持的写进文档并标注          | 见下方[已知边界](#已知边界)                                                                                                                                                          |
 
-### 1. 准备机器（一次性，需要管理员）
+## 环境要求
 
-```powershell
-# 交互面板：直接双击 r5-server.exe（或在终端执行）
-.\r5-server.exe
+| 项         | 要求                                                                                                          |
+| ---------- | ------------------------------------------------------------------------------------------------------------- |
+| 系统       | Windows x64（Windows Server 2022 验证过；进程/端口/防火墙/提权全部走 PowerShell 与 Win32 API，无 Linux 路径） |
+| 服务端内容 | 一个 `r5f-dedi-x.y.z` 目录，根目录须同时含 `r5apex_ds.exe` + `server.dll` + `loader.dll`                      |
+| 内存       | 每实例预留 **3.2 GB 工作集 / 6.5 GB 提交**；8 GB 机器必须设固定页面文件（`setup` 会做）                       |
+| 运行面板   | 无需运行时，`r5-server.exe` 是 Bun 编译的单文件                                                               |
+| 从源码构建 | [Bun](https://bun.sh)（见[开发](#开发)）                                                                      |
 
-# 或者命令行一次配好：防火墙 UDP / 页面文件 / Defender 排除 / 登录自启
-.\r5-server.exe setup --ports 37015 --dry-run     # 先预演看要改什么
-.\r5-server.exe setup --ports 37015               # 真正执行（会弹 UAC 提权）
-```
-
-`setup` 做四件事，可重复执行、幂等：
-
-| 动作           | 说明                                                         |
-| -------------- | ------------------------------------------------------------ |
-| Windows 防火墙 | 每个端口一条入站 UDP 规则（默认 37015）                      |
-| 页面文件       | 固定大小；8 GB 内存机器必须，否则换图会卡                    |
-| Defender 排除  | 排除本目录与 `r5apex_ds.exe`（注入式 `loader.dll` 易被误杀） |
-| 登录自启       | 计划任务「R5F Dedicated Server」，登录时拉起服务端           |
-
-> **云防火墙也要开**：腾讯云轻量控制台 → 防火墙 → 放行同样的 **UDP** 端口。
-> 云防火墙和 Windows 防火墙是两道独立的门，必须都开，否则外网连不上。
-
-### 2. 放入服务端内容
-
-把解压出来的 `r5f-dedi-x.y.z` 整个目录放进本目录：
-
-```
-r5-server\r5f-dedi-1.0.11\   ← 直接拷进来即可
-```
-
-放好后 `list` 就能看到它。运行 `doctor` 可以体检：
+## 快速开始
 
 ```powershell
+# 1. 把解压好的服务端目录放进面板所在目录（名字随意，三件套齐全即可）
+#    D:\r5-server\r5f-dedi-1.0.13\{r5apex_ds.exe, server.dll, loader.dll, ...}
+
+# 2. 主机一次性配置：防火墙 / 页面文件 / Defender 排除 / 登录自启（会弹 UAC）
+.\r5-server.exe setup --ports 37015 --dry-run    # 先看要改什么
+.\r5-server.exe setup --ports 37015
+
+# 3. 选版本并启动
 .\r5-server.exe list
-.\r5-server.exe doctor
+.\r5-server.exe use r5f-dedi-1.0.13
+.\r5-server.exe start
+
+# 4. 打开面板
+.\r5-server.exe
 ```
 
-### 3. 选择版本并启动
+启动后 10–30 秒内 `status` 会显示运行中；玩家用 R5Flowstate 启动器在服务器列表里找到它（`visibility=2`），或 `connect <公网IP>:37015`。
 
-```powershell
-.\r5-server.exe use r5f-dedi-1.0.11      # 记下来，以后 start 都用它
-.\r5-server.exe start                     # 未选版本时会提示你选
-```
+> **云服务器两道门都要开**：控制台的安全组/防火墙放行同样的 **UDP** 端口，与 Windows 防火墙是两套独立规则，只开一边外网连不上。
 
-首次启动会自动：加载地图 → 绑定 UDP 端口 → 把日志写进 `logs\`。
-大约 10–30 秒后 `status` 里能看到「运行中」。
+## 交互式面板
 
-### 4. 让玩家进来
-
-- 玩家装 R5Flowstate launcher
-- 服务器浏览器里找你的服（`visibility=2` 公开时），或直接用 IP：
-  `connect <服务器公网IP>:37015`
-
----
-
-## 二、日常使用
-
-```powershell
-.\r5-server.exe                # 打开交互面板（推荐）
-```
-
-面板里：`s` 启动 · `x` 停止 · `R` 重启 · `↑↓/Enter` 选版本 · `U` 升级 ·
-`t` 详情页 · `d` 体检页 · `e` 主机配置 · `g` 游戏设置 · `l` 日志跟随开关 · `PgUp/PgDn` 翻日志 · `Esc` 返回 · `q` 退出
-
-面板布局（内容区自动撑满终端高度，可滚动）：
+不带子命令运行 `r5-server`（TTY 下）即进入面板；非 TTY 会打印帮助。等价写法 `r5-server tui [--no-follow]`。
 
 ```
 ┌ R5Flowstate 服务器管理 ───────────────────────────┐  头部：根目录 / 当前版本 / 默认启动参数
-│ 当前版本 r5f-dedi-1.0.13  game v3.0.72.12        │
-│ 默认启动 UDP 37015 · 地图 … · 可见性 离线          │
 ├── 版本（2）─────┬── 实例 ─────────────────────────┤  左：本机所有版本（↑↓ 选，回车切换）
-│ ❯ r5f-dedi-1.0.13 │ 状态 运行中                  │  右：进程/地图/人数/CPU/内存/端口/日志
-├── 日志 ─────────┴───────────────────────────────┤  日志区：占满剩余高度
+│ ❯ r5f-dedi-1.0.13 │ 状态 运行中                │  右：进程/地图/人数/CPU/内存/端口/日志
+├── 日志 ─────────┴───────────────────────────────┤  日志区：占满剩余高度，收所有动作输出
 │ [3.096] Native(F):Mounted vpk file: …            │  PgUp/PgDn 回溯 · End 回到最新 · l 暂停跟随
 └──────────────────────────────────────────────────┘
-s 启动 · x 停止 · t 详情 · d 体检 · e 主机配置 · q 退出
 ```
 
-- **详情页（`t`）**：版本/启动参数、进程指标、日志状态、主机状态、最近操作，`↑↓`/`PgUp`/`PgDn` 滚动，`r` 刷新，`Esc` 返回。
-- **体检页（`d`）**：同样的主机检查，底部列出待处理项（防火墙缺失、页面文件偏小、Defender 未排除、未设自启、磁盘不足……）。
-- **主机配置页（`e`）**：能力清单，`空格` 勾选、`回车` 应用（会调用 `setup`，需要管理员，弹 UAC）：
+| 页面     | 键  | 内容                                                      | 页面内按键                                                                            |
+| -------- | --- | --------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| 主页     | —   | 版本列表 + 实例指标 + 实时日志                            | `↑↓` 选版本 · `Enter` 切换 · `s` 启动 · `x` 停止 · `R` 重启 · `U` 升级 · `l` 跟随开关 |
+| 详情     | `t` | 人数/地图/CPU/帧耗时/内存/端口/日志/自启                  | 滚动 · `r` 刷新                                                                       |
+| 环境体检 | `d` | 主机检查 + 本次运行健康（`error/warning/script_warning`） | 滚动 · `r` 刷新                                                                       |
+| 主机配置 | `e` | 能力清单：防火墙 / 页面文件 / Defender / 自启 / 电源计划  | `空格` 勾选 · `Enter` 应用（调 `setup`，弹 UAC）· `r` 重探                            |
+| 游戏设置 | `g` | 12 项启动设置，枚举与清单走候选列表                       | `Enter` 编辑 · `r` 还原默认 · 选中模式行且有实例在跑时 `x` 热切模式                   |
+| 在线玩家 | `p` | `status` 解析出的玩家表，机器人单独标记                   | `k` 踢 · `b` 封（确认框）· `u` 解封 · `+`/`-`/`c` 加减/清空机器人 · `r` 刷新          |
+| 封禁名单 | `B` | 本地 `banlist.json` 内容                                  | 滚动 · `r` 重新加载（先发 `banlist_reload`）                                          |
+| 公告     | `n` | `chat_announcements.csv` 行                               | `a` 新增 · `d` 删除选中 · `t` 立即广播 · `r` 重读                                     |
+| 控制台   | `:` | 单行控制台命令，在真实服务器上执行，输出进日志区          | `Enter` 执行 · `Esc` 取消                                                             |
+
+全局：`Esc` 返回主页 · `q` / `Ctrl+C` 退出。控制台或对话框打开时，所有字母键归输入，不再当快捷键。
+
+面板动作（`s`/`x`/`R`/`U`/`t`…）都在**子进程**里跑，输出写进日志区，不接管屏幕：
 
 ```
-❯ [x] Windows 防火墙放行 UDP 37015
-      规则「R5F dedi UDP 37015」已存在
-  [ ] 页面文件固定大小
-      当前：系统托管（8 GB 内存建议 8192/16384）
-  [ ] Defender 排除服务器目录
-  [ ] 开机自启（登录时启动）
-  [x] 电源计划设为高性能
+│ [6.681] Native(S):Script compiler finished in 1.777426 seconds     ← 游戏日志（原色）
+│ ▶ 切换版本到 r5f-dedi-1.0.13   (r5-server use r5f-dedi-1.0.13)     ← 动作标题
+│ ✔ 切换版本到 r5f-dedi-1.0.13 完成                                   ← 成功；失败是红色 ✘ 退出码 N
 ```
 
-未勾选的项会被显式跳过（`setup --no-firewall --no-pagefile --no-defender --no-task --no-power`）。
-开机自启已经并入这一页，不再占用主界面按键。
+## 命令参考
 
-### 游戏设置页（`g`）：改完就是最终生效值
+24 个可见子命令（另有隐藏的 `__logd`，由 `start` 自动拉起，不要手调）。
 
-```
-┌ 游戏设置（Esc 返回）─────────────────────────────────────────────────────────┐
-│ 启动设置   10 项 · 每项都是启动参数，改完需重启服务器 · 清单来自当前版本        │
-│ ❯ 服务器名          R5F Server                                              │
-│   地图              mp_rr_district        已修改                             │
-│   模式（playlist）  (空 = 由玩家选择)                                         │
-│   可见性            0  离线                                                  │
-│   在线认证          0  关闭                                                  │
-│   端口（UDP）       37193                 已修改                             │
-│   密码              (未设置)                                                 │
-│   命令配额          256 string/s                                             │
-│   脚本配额          128 script/s                                             │
-│   附加参数          (空)                                                     │
-│   显示在玩家看到的服务器列表与控制台标题里。                                   │
-│   默认值：R5F Server   ·   重启服务器后生效                                   │
-└──────────────────────────────────────────────────────────────────────────────┘
-```
+### 版本与实例
 
-编辑走**居中对话框**（`回车` 打开）：文本/数字是输入框（带实时校验），
-枚举和清单（地图/模式）是候选列表，末项总是「（手动输入…）」以便填清单外的值。
+| 命令            | 说明                                     | 选项                                                                                                                                                                                      |
+| --------------- | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `list`          | 列出根目录下的可用版本                   | `--fast` 跳过体积统计                                                                                                                                                                     |
+| `use [dir]`     | 选择/切换当前版本                        | —                                                                                                                                                                                         |
+| `start`         | 启动当前版本（未选版本时会先让你选）     | `--port` `--map` `--playlist` `--visibility` `--auth` `--password` `--hostname`（都只影响这一次，不写回配置）`--foreground` `--no-restart` `--no-host` `--force` `--detach`（默认即后台） |
+| `stop`          | 停止实例（连日志守护一起）               | `--all` 停掉本目录下所有实例                                                                                                                                                              |
+| `restart`       | 重启当前版本                             | —                                                                                                                                                                                         |
+| `status`        | 人数/地图/CPU/帧耗时/内存/端口/日志/自启 | `--watch` 每 3 秒刷新                                                                                                                                                                     |
+| `upgrade [dir]` | 备份旧配置 → 迁移 → 切换                 | `--to <dir>` `--carry none\|config\|all`（默认 `config`）`-y, --yes`                                                                                                                      |
 
-```
-        ╭────────────────────────────────────────────────────────────╮
-        │ 编辑：服务器名                                              │
-        │ 我的服务器▎                                                 │
-        │ 取值：1–60 个字符，允许中文                                  │
-        │ 重启服务器后生效                                            │
-        │ 启动时同步到 platform/cfg/system/autoexec_server.cfg 第 6 行 │
-        │ 回车 保存 · 退格 删除 · Esc 取消                             │
-        ╰────────────────────────────────────────────────────────────╯
-```
+### 日志与健康
 
-- 字段清单、默认值、取值说明都来自 `src/settings-fields.ts` 一张声明式表，
-  **CLI 与面板共用同一份校验**：`r5-server settings --port 70000` 与面板里输入 70000
-  得到同样的拒绝理由，不存在「一边能存一边不能存」。
-- 地图/模式候选**读当前版本的真实清单**（不是硬编码）：`platform/r5f_map_names.txt`
-  用 `dotenv` 解析，`platform/playlists_r5_patch.txt` 用 `keyvalues-tools` 解析
-  Valve KeyValues（Source 2 变体，裸值 + `//` 注释）。
-- **cfg 不会覆盖面板值**：`platform/cfg/system/autoexec_server.cfg` 在启动参数*之后*
-  执行，本来就写着 `hostname` / `spire_host_visibility`。启动前会把这些行同步成面板值
-  （只改已存在的行、保留缩进与注释），日志区会打印同步了哪些行：
+| 命令     | 说明                                                                       | 选项                                                                                |
+| -------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `logs`   | 看日志；默认本次运行                                                       | `-f, --follow` `--lines <n>`（默认 40）`--all` 列出全部分片 `--run <id>` 读指定分片 |
+| `health` | 本次运行健康：`latest.txt` → `error` / `warning` / `script_warning`        | `--json`                                                                            |
+| `doctor` | 环境体检（防火墙/页面文件/Defender/自启/电源 + 本次运行健康 + 对外可见性） | —                                                                                   |
 
-```
-  ▶ 启动服务器   (r5-server start)
-  已同步 platform/cfg/system/autoexec_server.cfg: spire_host_visibility "2" → "0"（否则 cfg 会覆盖面板设置）
-```
+### 玩家、机器人与审核
 
-设置页里对这类字段显示 `cfg≠` 与具体行号，编辑对话框里也会提示启动时会写哪一行。
+| 命令                      | 说明                                                      | 选项                                                    |
+| ------------------------- | --------------------------------------------------------- | ------------------------------------------------------- |
+| `players`                 | 在线玩家（解析引擎 `status`）                             | `--json`                                                |
+| `console <command...>`    | 在运行中的实例上执行控制台命令，并报告引擎回执            | `--json` `--wait <ms>`（默认 1200）                     |
+| `bots [list\|add\|clear]` | 机器人：列出 / 添加（`spawnbots`、`sv_addbot`）/ 全部踢掉 | `--json` `--count <n>` `--name <name>` `--team 0\|1\|2` |
+| `kick <target>`           | 踢出（userid 或 id64）                                    | —                                                       |
+| `ban <target>`            | 封禁（userid 或 id64；引擎无回执，结果无法确认）          | `--minutes` / `--reason` **不支持**，给了直接退出 1     |
+| `unban <target>`          | 解封（id64）                                              | —                                                       |
+| `banlist`                 | 本地 `banlist.json`（文件由引擎在首次真正写入封禁后生成） | `--reload` 先发 `banlist_reload` `--json`               |
 
-### 在线玩家与控制台（RCON 等效能力，不需要开 RCON）
+### 模式与公告
 
-面板里按 `p` 打开玩家页，按 `:` 打开控制台命令行。命令行**在真实服务器控制台上执行**，
-输出直接进日志区；玩家页的 `status` 也是同一通道取的。
+| 命令                                        | 说明                                                                                   | 选项                                                                                       |
+| ------------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `mode [list\|set] [playlist] [map]`         | 模式目录（按家族分组）与运行中热切（`bridge_setmode`；`set` 省略地图时用模式默认地图） | `--json`                                                                                   |
+| `announce`                                  | 触发一次轮播公告广播（`bridge_chat_announce`）                                         | `--json`                                                                                   |
+| `announcements [list\|add\|remove] [index]` | 编辑 `platform/datatable/chat_announcements.csv`                                       | `--json` `--text` `--kind rotate\|welcome` `--tag` `--color` `--sustain` `--fade` `--wait` |
 
-```
-┌ 在线玩家 ─────────────────────────────────────────────────────────┐
-│  2 人在线 · 数据来自服务器控制台 status                            │
-│  hostname: R5F Server  ·  version : 2.0.0.1/2001  ·  players : 2 … │
-│  #   userid  id64                  ping  状态        名字          │
-│  ❯   1       1001234567890123      45    active      Alpha        │
-│      2       1009876543210987      88    active      Beta 玩家     │
-│  k 踢出 · b 封禁 · u 解封 · r 刷新 · : 控制台 · Esc 返回            │
-└──────────────────────────────────────────────────────────────────┘
-```
+### 主机与设置
 
-```powershell
-.\r5-server.exe players                      # 在线玩家（解析 status，可 --json）
-.\r5-server.exe console status               # 在跑着的服务器上执行任意控制台命令
-.\r5-server.exe console changelevel mp_rr_canyonlands_hu   # 立即换图（不重启、不掉人）
-.\r5-server.exe kick 1                       # 踢出 userid=1
-.\r5-server.exe ban 1                        # 封禁（写入引擎的 banlist.json）
-.\r5-server.exe unban 1009876543210987       # 按 id64 解封
-```
+| 命令                                       | 说明                                                   | 选项                                                                                                                                                     |
+| ------------------------------------------ | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `setup`                                    | 防火墙 / 页面文件 / Defender / 自启 / 电源（自动提权） | `--ports <list>` `--dry-run` `--no-task` `--no-firewall` `--no-power` `--no-defender` `--no-pagefile` `--task-name` `--page-init <mb>` `--page-max <mb>` |
+| `autostart [enable\|disable\|status\|run]` | 开机自启计划任务（默认动作 `status`）                  | `--trigger logon\|startup` `--task-name` `--args` `--dry-run`                                                                                            |
+| `settings`                                 | 查看或修改持久启动设置（不带参数即打印表格）           | `--port` `--map` `--playlist` `--hostname` `--password` `--visibility` `--auth` `--quota-string` `--quota-script` `--extra`                              |
+| `tui`                                      | 打开交互式面板                                         | `--no-follow`                                                                                                                                            |
 
-面板里可用 `:` 直接跑同样能力：`changelevel <地图>`、`say <公告>`、`sv_password <pw>`、
-`kick "<userid>"`、`ban <userid>`、`unban <id64>`、`banlist_reload`、任意 cvar 热改。
+**退出码**：`console` / `kick` / `ban` / `unban` / `bots add` → `0` 成功或静默、`1` 命令不存在或用错、`2` 没有控制通道（没启用托管控制台）；`setup` / `autostart` → `1223` 表示用户拒绝了 UAC。
 
-**为什么不开引擎自带的 RCON**：本构建的 RCON 是自定义协议（AES-128-GCM 帧 + 会话/序列号），
-现成客户端连不上；而引擎自己的 `rcon_server.cfg` 启动时会执行并把 `sv_rcon_password` 覆盖成空，
-即默认关闭。我们改用它**同一条控制台权限通道**——托管控制台的输入管道 `R5F_CONSOLE_IN`
-（启动时的 `R5F_HOSTED_CONSOLE` 协议），由日志守护进程代理：
+## 配置
 
-```
-面板/CLI ──(127.0.0.1:临时端口 + 随机口令)──► __logd ──(R5F_CONSOLE_IN 管道)──► 引擎控制台
+唯一配置文件是根目录的 `r5-server.json`（写入采用临时文件 + 改名，崩溃不会截断）：
+
+```jsonc
+{
+  "current": "r5f-dedi-1.0.13", // 当前生效版本目录名
+  "settings": {/* 见下表 */},
+  "runtime": {
+    // 运行中实例，stop 后清空
+    "pid": 12345,
+    "port": 37015,
+    "version": "r5f-dedi-1.0.13",
+    "startedAt": "2026-09-14T15:28:44Z",
+    "logdPid": 12300,
+    "logFile": "logs\\r5f-dedi-1.0.13-37015-20260914-232844.log",
+    "ctlPort": 54321,
+    "ctlToken": "…",
+  },
+  "history": [/* 最近 50 条操作记录 */],
+}
 ```
 
-- 全程回环：不新增任何公网端口，不需要密码，不引入新的 DDoS 面（对应之前"RCON 留空/只回环"的结论）。
-- 控制端口是**临时端口**，令牌每次启动随机生成，存在 `r5-server.json` 的 `runtime.ctlPort/ctlToken`。
-- 引擎控制台输出本来就经 `R5F_HOSTED_CONSOLE` 回到日志文件，所以命令的输出在日志区直接可见。
+`settings` 的 12 个字段（`src/settings-fields.ts` 是**唯一**声明表，CLI 与面板共用同一份校验）：
 
-**动作输出不接管屏幕**：面板里按 `s`/`x`/`R`/`U`/`t`… 触发的命令会在后台子进程里执行，
-输出直接写进日志区（与游戏日志同屏、分色显示）：
+| 字段           | 类型            | 默认                  | 说明                                                                           |
+| -------------- | --------------- | --------------------- | ------------------------------------------------------------------------------ |
+| `hostname`     | string          | `R5F Server`          | 服务器名，1–60 字符，显示在服务器列表与控制台标题                              |
+| `map`          | string          | `mp_rr_arena_habitat` | 启动地图，候选来自当前版本真实清单                                             |
+| `playlist`     | string          | `fs_1v1`              | 启动即进入的模式；留空 = 由玩家选。取自 R5F 模式目录（按家族分组）             |
+| `visibility`   | 0/1/2           | `0`                   | `spire_host_visibility`：0 离线直连 / 1 隐藏 / 2 公开列表                      |
+| `authMode`     | 0/1/2           | `0`                   | `sv_onlineAuthMode` 在线认证强度，公开服建议开启                               |
+| `password`     | string          | 空                    | `sv_password`，客户端要一致；**明文存放**                                      |
+| `port`         | number          | `37015`               | 游戏 UDP 端口，一个实例一个                                                    |
+| `quotaString`  | number          | `256`                 | `sv_quota_stringCmdsPerSecond`                                                 |
+| `quotaScript`  | number          | `128`                 | `sv_quota_scriptExecsPerSecond`                                                |
+| `statsUpload`  | `default`/`off` | `default`             | 1v1 对战统计是否 POST 到 `play.r5flowstate.org`；`off` 追加 `+fs_stats_url ""` |
+| `logRetention` | number          | `10`                  | 保留最近几次运行的日志分片（本机设置，不传给引擎）                             |
+| `extra`        | string          | 空                    | 原样追加到启动命令行，用于传本表没有的参数                                     |
+
+`statsUpload` 与 `logRetention` 目前**只能在面板的游戏设置页改**（`settings` 命令没有对应开关）。
+
+## 工作原理
+
+### 目录布局
 
 ```
-│ [6.681] Native(S):Script compiler finished in 1.777426 seconds        ← 游戏日志（原色）
-│ ▶ 切换版本到 r5f-dedi-1.0.13   (r5-server use r5f-dedi-1.0.13)        ← 动作标题（绿色加粗）
-│ 当前版本已设为 r5f-dedi-1.0.13                                        ← 命令输出（青色）
-│ ✔ 切换版本到 r5f-dedi-1.0.13 完成                                     ← 成功（绿色）
+r5-server\
+├─ r5-server.exe            面板本体（Bun 编译单文件）
+├─ r5-server.json           状态：当前版本 / 启动设置 / 运行中实例 / 操作历史
+├─ start_dedi.bat           双击入口：等价于直接运行 r5-server.exe
+├─ logs\                    每次运行一份日志分片 + 日志守护 pid 文件
+├─ backups\                 upgrade 前的运维文件备份（按时间戳）
+└─ r5f-dedi-1.0.13\         一个版本一个目录，三件套齐全才会被识别
+   ├─ r5apex_ds.exe  server.dll  loader.dll
+   └─ platform\ paks\ vpk\ maps\ mods\ cfg\ audio\ r2\ ...
 ```
 
-失败时最后一行是红色的 `✘ 动作名 退出码 N`；长动作（启动/升级）期间日志区标题会显示 `⏳ … 运行中…`。
-日志区用 `PgUp/PgDn` 回溯，`End` 回到最新，`l` 暂停/恢复跟随。
+根目录取自 `r5-server.exe` 所在目录（源码方式运行时取仓库根）。版本目录名随便叫，**只要三件套齐全**就会被 `list` 收录；名字里带 `x.y.z` 时按版本号倒序排列。
 
-命令行等价写法：
+### 托管控制台：日志与控制通道
 
-```powershell
-.\r5-server.exe status                 # 人数 / 地图 / CPU / 帧耗时 / 内存 / 端口 / 日志 / 自启
-.\r5-server.exe status --watch         # 每 3 秒刷新
-.\r5-server.exe logs --lines 50        # 看最近的日志
-.\r5-server.exe logs -f                # 实时跟随（Ctrl+C 退出）
-.\r5-server.exe stop                   # 停服（连日志守护一起停）
-.\r5-server.exe restart                # 重启
+启动时面板先把引擎的控制台接管过来（用的是 R5Flowstate 官方启动器同一套协议），再拉起一个**分离的**日志守护 `__logd`：
+
+```
+面板 / CLI ──(127.0.0.1:临时端口 + 随机令牌)──► __logd ──(R5F_CONSOLE_IN 管道)──► 引擎控制台
+                                                  │
+                                          追加写入 logs\<版本>-<端口>-<时间>.log
 ```
 
-### 日志是怎么来的
+引擎通过 `R5F_HOSTED_CONSOLE` / `R5F_CONSOLE_PIPE` 把控制台输出写进命名管道，守护进程落盘；`R5F_CONSOLE_IN` 反向传输入，所以 `console` / `players` / `kick` 这些命令能在真实服务器控制台上执行。
 
-服务端启动时，CLI 会先拉起一个**托管控制台**（命名管道，用的是 R5Flowstate
-官方 launcher 同一套协议：`R5F_HOSTED_CONSOLE` / `R5F_CONSOLE_PIPE`），引擎把
-控制台输出写进管道，守护进程落盘成 `logs\<版本>-<端口>.log`。
-所以：**关掉终端不影响服务器和日志**，日志文件可以随时 `logs -f` 追。
+- **关掉终端不影响服务器和日志**：守护进程与引擎都是分离进程，日志文件随时可以 `logs -f` 追。
+- **控制通道全回环**：端口由系统分配、令牌每次启动随机，不新增公网端口。远程运维走 SSH / 私网隧道。
+- 不想要这套（比如你要看引擎自己的窗口）：`start --no-host`——代价是日志只在引擎窗口里，`logs` 不再有新内容。
 
-不想要这套（例如你更习惯看引擎自己的窗口，或想用窗口标题里的人数和 CPU 指标）：
+### 回执：命令到底有没有生效
 
-```powershell
-.\r5-server.exe start --no-host
+引擎对命令的回答只有四种，面板逐类如实汇报：
+
+| 回执      | 典型输出                                         | 含义                                                                                   |
+| --------- | ------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `success` | `Kicked '1' from server`                         | 明确动作行                                                                             |
+| `unknown` | `Command 'x' doesn't exist; request 'x' ignored` | 命令不存在                                                                             |
+| `usage`   | `usage 'sv_addbot': name(string) teamid(int)`    | 参数用错                                                                               |
+| `silent`  | 没有任何输出                                     | 命令存在但引擎不回话（`ban` / `unban` / `banlist_reload` / `bridge_chat_announce` 等） |
+
+**静默不是成功。** 这一类操作只会报告"已发送（引擎无回执）"。
+
+### cfg 同步
+
+`platform/cfg/system/autoexec_server.cfg` 在启动参数之后执行，里面本来就写着 `hostname` / `spire_host_visibility` 等行。启动前面板把这些行同步成面板值（**只改已存在的行**，保留缩进与注释），日志区会打印同步了什么：
+
+```
+▶ 启动服务器   (r5-server start)
+已同步 platform/cfg/system/autoexec_server.cfg: spire_host_visibility "2" → "0"（否则 cfg 会覆盖面板设置）
 ```
 
-### 改启动参数
+设置页对这类字段显示 `cfg≠` 与行号。
 
-启动参数持久保存在 `r5-server.json`，用 `settings` 改：
+### 日志分片与健康
 
-```powershell
-.\r5-server.exe settings --port 37016 --map mp_rr_district --visibility 1
-.\r5-server.exe settings                      # 看当前设置
-```
+- 每次启动写一份 **`logs\<版本>-<端口>-<YYYYMMDD-HHMMSS>.log`**，按 `settings.logRetention` 保留最近 N 份；`logs --all` 列出分片，runid 就是尾部的时间戳。
+- 引擎自己每次运行也写 `platform\logs\server\<uuid>\{error,warning,script_warning}.log`，`latest.txt` 指向本次——`health` / 体检页读的就是它。**`error.log` 非空即本次运行有问题**；级别按文件与词判定，`Native(E)` 前缀本身不是错误级别。
+- ⚠️ 引擎日志含运行期密钥（如 `Installed NetKey: '…'`），**分享日志前先检查**。
 
-常用项：
-
-| 选项           | 含义                                                                       |
-| -------------- | -------------------------------------------------------------------------- |
-| `--port`       | UDP 端口，一个实例一个                                                     |
-| `--map`        | 启动地图 stem，见 `platform\r5f_map_names.txt`                             |
-| `--playlist`   | 启动即进入某模式（留空=等玩家选），id 见 `platform\playlists_r5_patch.txt` |
-| `--visibility` | 0=离线不上链 1=隐藏(凭 token) 2=公开列表                                   |
-| `--auth`       | `sv_onlineAuthMode`：0 关 / 1 强制 join token / 2 有就校验（公开服建议 1） |
-| `--password`   | 服务器密码，客户端要一致                                                   |
-| `--hostname`   | 服务器名（空名会被主服务器拒）                                             |
-
-单次覆盖（不写回配置）：`.\r5-server.exe start --port 37017 --map mp_rr_aqueduct`
-
----
-
-## 三、未来更新（升级到新版本）
+## 升级与回退
 
 设计目标：**换版本不动运维配置，出问题能退回。**
 
-### 步骤
-
-1. 把新版本解压到本目录（与旧版本并列）：
-   ```
-   r5-server\r5f-dedi-1.0.13\   ← 新
-   r5-server\r5f-dedi-1.0.11\   ← 旧（保留）
-   ```
-2. 执行升级：
-
-   ```powershell
-   .\r5-server.exe upgrade               # 交互：列出版本，选更新的那个
-   .\r5-server.exe upgrade --to r5f-dedi-1.0.13 --yes
-   ```
-
-3. CLI 依次做：
-   - 校验新版本三件套齐全；
-   - 把**当前版本**的运维文件备份到 `backups\<时间戳>\<版本>\`；
-   - 按迁移策略把运维改动复制到新版本目录；
-   - 把 `r5-server.json` 的 `current` 指向新版本；
-   - 提示 `restart` 生效。
-
-### 迁移策略（`--carry`）
-
-| 取值             | 迁移内容                                                                                                                                                                                          |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config`（默认） | `mods\` 以外的运维文件：`platform\playlists_r5_patch.txt`、`platform\r5f_map_names.txt`、`platform\r5f_wip_maps.txt`、`platform\cfg\**`（`autoexec_server*.cfg`、`game.cfg`、`tools\rcon_*.cfg`） |
-| `all`            | 上面这些 **+ `mods\` 整个目录**                                                                                                                                                                   |
-| `none`           | 不迁移，只切版本（想用新版本自带配置时）                                                                                                                                                          |
-
-### 升级后
-
 ```powershell
-.\r5-server.exe restart        # 或 stop 后 start
-.\r5-server.exe status
-.\r5-server.exe logs -f        # 确认新版本正常起图
-```
+# 1. 把新版本解压到根目录，与旧版本并列（旧目录先留着）
+.\r5-server.exe list                       # 确认新版本被识别
 
-### 回退
+# 2. 升级：校验三件套 → 备份当前版本的运维文件到 backups\<时间戳>\ → 迁移 → 切换 current
+.\r5-server.exe upgrade --to r5f-dedi-1.0.14 --yes
 
-旧版本目录没有被删除，`use` 回去再 `restart` 即可：
-
-```powershell
-.\r5-server.exe use r5f-dedi-1.0.11
+# 3. 生效并确认
 .\r5-server.exe restart
+.\r5-server.exe status
+.\r5-server.exe logs -f
 ```
 
-配置想还原：从 `backups\<时间戳>\` 里拷回对应文件。确认新版本稳定后，旧版本目录和
-备份可以自行删除（没被 CLI 自动清理）。
+迁移范围由 `--carry` 决定：
 
-### 一句话版本流程
+| 取值             | 迁移内容                                                                                                              |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `config`（默认） | `mods\` 以外的运维文件：`platform\playlists_r5_patch.txt`、`r5f_map_names.txt`、`r5f_wip_maps.txt`、`platform\cfg\**` |
+| `all`            | 上面这些 **+ `mods\` 整个目录**                                                                                       |
+| `none`           | 不迁移，只切版本（想用新版本自带配置时）                                                                              |
 
-```
-解压新版本 → upgrade（自动备份+迁移+切换）→ restart → status/logs 确认 → 稳了再删旧目录
-```
+**回退**：旧版本目录没被删除，`use` 回去再 `restart` 即可；配置从 `backups\<时间戳>\` 拷回。确认新版本稳定后旧目录与备份可以自行删除（面板不会自动清理）。
 
-### 升级 CLI 本体（`r5-server.exe`）
-
-托管控制台运行时，日志守护进程就是 `r5-server.exe __logd`，会锁住这个文件。所以
-**替换 CLI 前先停服**：
+**换 `r5-server.exe` 本身前先停服**——托管控制台运行时，日志守护就是这个 exe，文件被占用：
 
 ```powershell
-.\r5-server.exe stop --all     # 停服 + 停日志守护
-# 再把新的 r5-server.exe 覆盖进来
+.\r5-server.exe stop --all
+# 覆盖 r5-server.exe
 .\r5-server.exe status
 ```
 
-（只升级服务端版本目录时不需要停——那些文件在别处，只要不在运行。）
+## 多开实例
 
----
-
-## 四、常见问题
-
-| 现象                                    | 处理                                                                                             |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `start` 30 秒内报「没有出现服务端进程」 | `doctor` 看三件套 / Defender 排除；确认 `r5apex_ds.exe` `server.dll` `loader.dll` 都在版本目录根 |
-| `start` 报「UDP xxx 已被占用」          | 别的实例在跑：`status` 看 pid，或 `stop --all`；也可换端口                                       |
-| 玩家连不上                              | 云防火墙 + Windows 防火墙都要放 UDP 端口；`status` 里确认端口绑定                                |
-| 日志文件一直空                          | 本次是 `--no-host` 启动的（日志只在引擎窗口）；不加该参数重启即可                                |
-| 内存吃紧（8 GB 机器）                   | `setup` 已把页面文件设成固定 8 GB；能加内存到 16 GB 更稳（单实例提交约 6.5 GB）                  |
-| 换图时卡                                | 同上，页面文件太小或机械盘；内容盘建议 NVMe                                                      |
-| 开机没自启                              | `autostart status` 看状态；登录触发的任务需要自动登录（`netplwiz`）或重启后登录一次              |
-| 想限定端口来源                          | 云防火墙里把 UDP 规则改成只允许你的玩家网段                                                      |
-
-### 多开实例
-
-同一版本目录可以跑多个实例（实测可行），每个实例一个端口：
+同一个版本目录可以跑多个实例，各用各的端口：
 
 ```powershell
 .\r5-server.exe start --port 37015 --force
 .\r5-server.exe start --port 37016 --force
 ```
 
-内存按 **每实例 6.5 GB 提交 / 3.2 GB 工作集** 预留；CPU 空闲约 0.1 核，开局加载约 1 核 20 秒。
+内存按 **每实例 6.5 GB 提交 / 3.2 GB 工作集**预留；空闲约 0.1 核，开局加载约 1 核 × 20 秒。
 
----
+## 常见问题
 
-## 五、开发者（本目录源码）
+| 现象                                    | 处理                                                                                                          |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `start` 30 秒内报「没有出现服务端进程」 | `doctor` 看三件套是否齐全、Defender 是否已排除；确认 `r5apex_ds.exe` `server.dll` `loader.dll` 都在版本目录根 |
+| `start` 报 UDP 端口被占用               | 已有实例在跑：`status` 看 pid，或 `stop --all`；也可换端口                                                    |
+| 玩家连不上                              | 云防火墙 + Windows 防火墙都要放行 UDP；`status` 里确认端口已绑定                                              |
+| 日志文件一直空                          | 这次是 `--no-host` 启动的（日志只在引擎窗口），去掉该参数重启                                                 |
+| 内存吃紧（8 GB 机器）                   | `setup` 会把页面文件设成固定大小；能加到 16 GB 更稳                                                           |
+| 换图时卡顿                              | 同上，页面文件太小或机械盘；内容盘建议 NVMe                                                                   |
+| 开机没自启                              | `autostart status`；`logon` 触发的任务需要自动登录（`netplwiz`）或重启后登录一次                              |
+| 命令看起来"没反应"                      | 看回执类别：`silent` 表示引擎不回话（不是失败），`unknown` 才是命令不存在                                     |
 
-```
-src\
-├─ cli.tsx        入口：commander 参数解析 + Ink 面板
-├─ tui.tsx        Ink 面板（主界面 + 详情/体检/主机配置三个页面）
-├─ keys.ts         面板按键路由（纯函数，可单独验证）
-├─ inspect.ts      异步数据采集（详情/体检/能力清单）
-├─ serverinfo.ts   版本描述与日志/标题解析
-├─ settings-fields.ts  设置项声明表（渲染 + 校验，CLI/面板共用）
-├─ settings-edit.ts    设置编辑状态机（纯函数）
-├─ catalog.ts      地图/模式清单（dotenv + keyvalues-tools）
-├─ （控制台通道在 tap.ts 的 __logd 与 commands.ts 的 console/players 里）
-├─ cfg.ts          引擎 cfg 读取与 cvar 同步（shell-quote）
-├─ commands.ts    list/use/start/stop/status/logs/autostart/upgrade/setup/settings/doctor
-├─ state.ts       r5-server.json 读写
-├─ versions.ts    版本发现 / 校验 / 排序 / 迁移清单
-├─ tap.ts         托管控制台：命名管道 + 日志守护 + 日志读取
-├─ win.ts         Windows：FFI(控制台 UTF-8/ANSI)、提权、PowerShell、进程查询
-├─ ui.ts          非面板命令的终端输出
-├─ util.ts        共用小工具：读文件、收窄 unknown JSON
-└─ stubs\         react-devtools-core 空实现（Ink 可选依赖，见 tsconfig paths）
-```
+## 已知边界
 
-```powershell
-bun run src/cli.tsx <命令>      # 开发期直接跑源码（不要反复打包）
-bun run build                  # 需要发版时才编译成 r5-server.exe
-```
+- **`ban --minutes` / `--reason` 不支持**：封禁时长与原因是 Spire 侧的模型，面板只发 `ban <target>`；给了这两个参数会直接报错退出，不会把半截命令发到引擎。
+- **`mute`（禁言）未实现**：本构建没有可用的禁言命令。
+- **`say` / `chat_announce` 不存在**：实测引擎报错。广播公告用 `announce`（`bridge_chat_announce`）+ `announcements` 编辑文案表。
+- **机器人不可封禁**：`spawnbots` / `sv_addbot` 造出来的假玩家 `uniqueid == "0"` 且无地址，只能踢。
+- **踢人必须带引号**：`kick "<userid>"`——不带引号无效，面板已处理。
+- **封禁/解封无回执**：引擎不回话，面板无法确认结果；`banlist.json` 由引擎在首次真正写入封禁后生成，不一定存在。
+- **Windows 限定**：所有进程、端口、防火墙、提权逻辑都依赖 PowerShell 与 Win32 API。
+- **控制通道只回环**：不提供远程管理端口；远程运维走 SSH / 私网隧道。
+- **`r5f-dedi` 目录只读**：面板不会修改引擎内容，除了 cfg 同步与用户主动编辑的公告表。
 
-### 提交前检查
-
-oxlint（规则）与 oxfmt（格式）是本仓库唯一的检查与格式化工具，配置在
-`.oxlintrc.json` / `.oxfmtrc.jsonc`，缩进与换行同时写进 `.editorconfig` 供编辑器读取。
+## 开发
 
 ```powershell
-bun run check        # 完整闸门：类型 + 规则 + 格式，全绿才提交
-bun run lint         # 只跑规则（含类型感知规则，如 no-floating-promises）
-bun run lint:fix     # 应用可自动修复的规则
-bun run typecheck    # 规则 + TypeScript 编译诊断（等价 tsc --noEmit，无需额外依赖）
-bun run fmt          # 写回格式
-bun run fmt:check    # 只检查不改动（CI / 提交前用）
+bun install
+bun run dev                    # 源码方式运行面板（改代码即时生效）
+bun run build                  # 编译单文件 r5-server.exe（bun-windows-x64，minify）
 ```
 
-`bun run check` 会在任何一条不过时以非零码退出：规则里 correctness / suspicious 是
-error，perf 是 warning，且 `denyWarnings` 打开 —— 有 warning 也算不过。
+源码结构（`src/`）：
 
-已知的刻意取舍（改规则前先读这里）：
+| 文件                 | 职责                                                                                        |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `cli.tsx`            | commander 入口：所有子命令注册 + 无参数时进面板                                             |
+| `commands.ts`        | 命令实现：启动/停止/升级/设置/玩家/审核/公告/模式/健康；启动参数构造；控制通道客户端        |
+| `tui.tsx`            | Ink 面板：8 个页面（主页/详情/体检/主机配置/游戏设置/在线玩家/封禁名单/公告）、轮询、日志区 |
+| `keys.ts`            | 按键路由与状态迁移（纯函数，可单测）                                                        |
+| `settings-fields.ts` | **唯一**的设置项声明表：渲染、校验、CLI、面板共用                                           |
+| `settings-edit.ts`   | 设置编辑状态机（浏览/输入/选择）                                                            |
+| `state.ts`           | `r5-server.json` 读写与容错                                                                 |
+| `versions.ts`        | 版本发现、三件套校验、排序、升级迁移清单                                                    |
+| `tap.ts`             | 托管控制台：命名管道、`__logd` 日志守护、回环控制口                                         |
+| `cfg.ts`             | 引擎 cfg 读取与 cvar 同步（`shell-quote` 解析，行级重写）                                   |
+| `catalog.ts`         | 从版本目录读真实清单：地图名、模式目录（按家族分组）                                        |
+| `announcements.ts`   | 公告表解析/渲染/校验（`chat_announcements.csv`）                                            |
+| `receipt.ts`         | 回执分类（纯函数，`success` / `unknown` / `usage` / `silent`）                              |
+| `inspect.ts`         | 面板数据采集：详情、体检、主机能力、运行健康                                                |
+| `serverinfo.ts`      | 版本描述与日志/`status` 头部解析                                                            |
+| `ui.ts` / `util.ts`  | 终端渲染原语；共用小工具                                                                    |
+| `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源、UAC             |
+| `stubs/`             | 编译 exe 用的替身（`react-devtools-core`）                                                  |
 
-| 规则                                        | 状态 | 原因                                                      |
-| ------------------------------------------- | ---- | --------------------------------------------------------- |
-| `eslint/no-await-in-loop`                   | 关闭 | 本 CLI 大量「轮询引擎就绪 / 顺序下发命令」，并发反而错    |
-| `oxfmt.ignorePatterns` 里的 `r5f-dedi-*/**` | 忽略 | 版本目录只读（`CONTEXT.md` 不变量 7），含引擎自带 md/json |
+提交前跑完整闸门（oxlint 规则 + 类型诊断 + oxfmt 格式，`denyWarnings` 打开，有 warning 也算不过）：
 
-如果某条规则确实不适用，在 `.oxlintrc.json` 里显式关闭并写清原因 —— 不要用行内
-`oxlint-disable` 散落在源码里。
+```powershell
+bun run check                  # 完整闸门：typecheck + fmt:check
+bun run lint:fix               # 应用可自动修复的规则
+bun run fmt                    # 写回格式
+```
+
+规则不适用时在 `.oxlintrc.json` 里显式关闭并写清原因，不要在源码里散落行内 `oxlint-disable`。
+
+模块职责与领域词汇见 [CONTEXT.md](CONTEXT.md)，设计与工单见 `.scratch/fleet-ops/`，仓库约定见 [AGENTS.md](AGENTS.md)。
