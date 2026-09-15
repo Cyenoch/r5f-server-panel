@@ -28,24 +28,25 @@ r5-server 的领域词汇表与模块地图。文档基建：`AGENTS.md`（约�
 
 ## 模块地图（`src/`）
 
-| 文件                 | 职责                                                                               |
-| -------------------- | ---------------------------------------------------------------------------------- |
-| `cli.tsx`            | commander 入口；所有子命令；help 中文化（输出层）                                  |
-| `commands.ts`        | 命令实现：启动/停止/重启/升级/设置/玩家/控制台/日志…；构造启动参数；控制通道客户端 |
-| `state.ts`           | `r5-server.json` 的读写与容错（`Settings`/`Runtime`/`HistoryEntry`）               |
-| `versions.ts`        | 版本目录发现、备份、切换                                                           |
-| `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源         |
-| `tap.ts`             | `__logd` 日志守护：管道、日志文件、控制口                                          |
-| `inspect.ts`         | 面板数据采集：详情、体检、主机能力、（规划中）健康                                 |
-| `ui.ts`              | 渲染原语（`kv` 按显示宽度对齐、`truncate`、`padEndWidth`、色调）                   |
-| `tui.tsx`            | Ink 界面与路由；动作子进程化（输出进日志区）                                       |
-| `keys.ts`            | 纯函数按键路由（路由 + 状态迁移，可单测）                                          |
-| `settings-fields.ts` | **唯一**的设置项声明表：渲染、校验、CLI、TUI 共用                                  |
-| `settings-edit.ts`   | 设置编辑状态机（browse/input/pick）                                                |
-| `catalog.ts`         | 从版本目录读真实清单：地图名、playlist、（规划中）模式目录                         |
-| `cfg.ts`             | 读/校验/行级重写引擎 cfg（`shell-quote` 解析）                                     |
-| `serverinfo.ts`      | 日志摘要与 status 头部解析                                                         |
-| `stubs/`             | 编译 exe 用的替身（`react-devtools-core`）                                         |
+| 文件                 | 职责                                                                                       |
+| -------------------- | ------------------------------------------------------------------------------------------ |
+| `cli.tsx`            | commander 入口；所有子命令；help 中文化（输出层）                                          |
+| `commands.ts`        | 命令实现：启动/停止/重启/升级/设置/玩家/控制台/日志…；构造启动参数；控制通道客户端         |
+| `state.ts`           | `r5-server.json` 的读写与容错（`Settings`/`Runtime`/`HistoryEntry`）                       |
+| `versions.ts`        | 版本目录发现、备份、切换                                                                   |
+| `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源                 |
+| `tap.ts`             | `__logd` 日志守护：管道、日志文件、控制口；日志尾部/增量读（水位线）                       |
+| `inspect.ts`         | 面板数据采集：详情、体检、主机能力、（规划中）健康                                         |
+| `ui.ts`              | 渲染原语（`kv` 按显示宽度对齐、`truncate`、`padEndWidth`、带插入点的 `renderField`、色调） |
+| `tui.tsx`            | Ink 界面与路由；动作子进程化（输出进日志区，按到达顺序与引擎日志归并）                     |
+| `keys.ts`            | 纯函数按键路由（路由 + 状态迁移，可单测）                                                  |
+| `settings-fields.ts` | **唯一**的设置项声明表：渲染、校验、CLI、TUI 共用                                          |
+| `settings-edit.ts`   | 设置编辑状态机（browse/input/pick）                                                        |
+| `text-field.ts`      | 一行文本 + 插入点的纯模型（设置、控制台、公告文字行共用；按码点移动）                      |
+| `catalog.ts`         | 从版本目录读真实清单：地图名、playlist、（规划中）模式目录                                 |
+| `cfg.ts`             | 读/校验/行级重写引擎 cfg（`shell-quote` 解析）                                             |
+| `serverinfo.ts`      | 日志摘要与 status 头部解析                                                                 |
+| `stubs/`             | 编译 exe 用的替身（`react-devtools-core`）                                                 |
 
 ## 不变量（改代码时必须保持）
 

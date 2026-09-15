@@ -45,18 +45,25 @@ import {
 import { formatUptime, gameStateLabel, parseServerTitle, summariseLog } from "./serverinfo";
 import { SETTINGS_FIELDS, type FieldDef, type FieldId, fieldById } from "./settings-fields";
 import { ROOT, defaultSettings, loadState, type State } from "./state";
-import { isPidAlive, readTail, stripAnsi } from "./tap";
-import { fitLine, padEndWidth, truncate } from "./ui";
+import { isPidAlive, readDelta, readTailState, stripAnsi } from "./tap";
+import type { TextField } from "./text-field";
+import { fitLine, padEndWidth, renderField, truncate } from "./ui";
 import { discoverVersions, isNewer, parseVersion, type VersionInfo } from "./versions";
 import * as win from "./win";
 
+/** One line in the pane: `at` is when the pane took it in — 两条流按它归并。 */
+type PaneLine = { text: string; at: number };
+
 /** One line of console output produced by an action inside the dashboard. */
-type ConsoleEntry = { text: string; kind: "head" | "out" | "error" };
+type ConsoleEntry = PaneLine & { kind: "head" | "out" | "error" };
 
 export type RunCommand = (args: string[], onLine: (line: string) => void) => Promise<number>;
 
 /** Persist one launch setting (validation + write happen in commands.ts). */
 export type ApplySetting = (id: FieldId, raw: string) => { ok: boolean; error?: string; text: string };
+
+/** 日志区窗口：跟到最新即可，回溯由 UI 的滚动负责。 */
+const LOG_WINDOW = 500;
 
 type Snapshot = {
   state: State;
@@ -65,7 +72,9 @@ type Snapshot = {
   ports: string[];
   /** log file currently being watched (may not exist yet while starting) */
   logPath: string;
-  logLines: string[];
+  logLines: PaneLine[];
+  /** 已经读到日志文件的哪个字节（整行边界，见 `readDelta`） */
+  logOffset: number;
   stateError: string;
   refreshedAt: number;
 };
@@ -205,7 +214,7 @@ function useSnapshot(
   follow: boolean,
   selIndex: number,
   preferPredicted: boolean,
-): { snap: Snapshot; refresh: () => void } {
+): { snap: Snapshot; refresh: () => void; flushLog: () => void } {
   const [snap, setSnap] = useState<Snapshot>(() => ({
     state: loadState(),
     versions: [],
@@ -213,6 +222,7 @@ function useSnapshot(
     ports: [],
     logPath: "",
     logLines: [],
+    logOffset: 0,
     stateError: "",
     refreshedAt: Date.now(),
   }));
@@ -257,6 +267,13 @@ function useSnapshot(
     preferRef.current = preferPredicted;
   }, [selIndex, preferPredicted]);
 
+  /**
+   * 跟日志：只读水位线之后的新字节，新行按"读到它的这一刻"入账。
+   *
+   * 时间戳是两条流（引擎日志、面板动作输出）归并的依据 —— 面板自己的输出在写下时
+   * 就带时间，引擎那半只有在**下一次轮询**读到新行时才拿到时间，所以引擎的启动横幅
+   * 不会再跑到「▶ 启动服务器」前面去。
+   */
   const fast = useCallback(() => {
     setSnap((prev) => {
       if (!follow) return prev;
@@ -265,10 +282,21 @@ function useSnapshot(
         prev.versions[selRef.current]?.name ?? prev.state.current ?? "",
         preferRef.current,
       );
-      if (!file) return prev;
-      const lines = readTail(file, 500).map((line) => stripAnsi(line));
-      if (file === prev.logPath && lines.length === prev.logLines.length) return prev;
-      return { ...prev, logPath: file, logLines: lines };
+      if (!file || !existsSync(file)) return prev;
+      const at = Date.now();
+      // 同一个文件：只读水位线之后的新字节；换了文件或文件被截断：整窗重读。
+      const delta = file === prev.logPath ? readDelta(file, prev.logOffset) : null;
+      if (delta !== null && delta.lines.length === 0) {
+        return delta.offset === prev.logOffset ? prev : { ...prev, logOffset: delta.offset };
+      }
+      const read = delta ?? readTailState(file, LOG_WINDOW);
+      const entries = read.lines.map((text) => ({ text: stripAnsi(text), at }));
+      return {
+        ...prev,
+        logPath: file,
+        logLines: delta ? [...prev.logLines, ...entries].slice(-LOG_WINDOW) : entries,
+        logOffset: read.offset,
+      };
     });
   }, [follow, selRef, preferRef]);
 
@@ -287,7 +315,7 @@ function useSnapshot(
     void slow();
   }, [slow]);
 
-  return { snap, refresh };
+  return { snap, refresh, flushLog: fast };
 }
 
 /** Load page data when the route changes (and on demand). */
@@ -722,7 +750,7 @@ function SettingsDialog({
 }: {
   field: FieldDef;
   mode: "input" | "pick";
-  buffer: string;
+  buffer: TextField;
   error: string | null;
   options: { value: string; label: string; note?: string }[];
   pick: number;
@@ -733,7 +761,6 @@ function SettingsDialog({
 }): React.ReactElement {
   const width = Math.max(48, Math.min(88, columns - 12));
   const inner = width - 4;
-  const caret = "\u258e";
 
   const cfgLines = cfgOverrides.slice(0, 2).map((entry) => ({
     text: `启动时同步到 ${entry.file} 第 ${entry.line} 行（现在是 ${entry.value}）`,
@@ -769,7 +796,7 @@ function SettingsDialog({
           { text: `取值：${field.spec}` },
         ]
       : [
-          { text: `${truncate(buffer, inner - 2)}${caret}` },
+          { text: renderField(buffer, inner - 1) },
           { text: `取值：${field.spec}` },
           error ? { text: `✘ ${error}`, tone: "red" as const } : { text: field.scope },
         ];
@@ -777,9 +804,9 @@ function SettingsDialog({
     head,
     ...body,
     ...cfgLines,
-    {
-      text: mode === "pick" ? "↑↓ 选择 · 回车 确认 · Esc 取消" : "回车 保存 · 退格 删除 · Esc 取消",
-    },
+    ...(mode === "pick"
+      ? [{ text: "↑↓ 选择 · 回车 确认 · Esc 取消" }]
+      : [{ text: "回车 保存 · Esc 取消" }, { text: "←→/Home/End 移光标 · 退格 删除" }]),
   ];
 
   // Every cell of the rectangle is written (padded spaces included): Ink only
@@ -893,8 +920,13 @@ function AnnounceDialog({
   const rowsOf: DialogLine[] = ANNOUNCE_FIELDS.map((key) => {
     const active = key === focused;
     const value = form[key];
+    const cellWidth = Math.max(8, inner - 14);
+    // 光标行按插入点渲染（空单元格只剩一个光标），其余行照旧显示原文。
+    const shown = active
+      ? renderField({ text: value, caret: form.caret }, cellWidth)
+      : fitLine(value.length > 0 ? value : "(空)", cellWidth);
     return {
-      text: `${active ? "❯" : " "} ${padEndWidth(ANNOUNCE_FIELD_LABELS[key], 8)}${fitLine(value.length > 0 ? value : "(空)", Math.max(8, inner - 14))}`,
+      text: `${active ? "❯" : " "} ${padEndWidth(ANNOUNCE_FIELD_LABELS[key], 8)}${shown}`,
       tone: active ? ("cyan" as const) : undefined,
       bold: active,
     };
@@ -908,7 +940,8 @@ function AnnounceDialog({
     ...rowsOf,
     { text: hints[focused] },
     ...feedback,
-    { text: "↑↓ 换字段 · ←→ 切换种类/颜色 · 回车 保存 · Esc 取消" },
+    { text: "↑↓ 换字段 · ←→ 移光标（种类/颜色为换值）" },
+    { text: "回车 保存 · Esc 取消" },
   ];
   const height = Math.min(lines.length + 2, Math.max(8, rows - 6));
 
@@ -961,7 +994,7 @@ export function Dashboard({
   const [now, setNow] = useState(() => Date.now());
   const [reloadKey, setReloadKey] = useState(0);
   const starting = Boolean(running && running.startsWith("启动"));
-  const { snap, refresh: refreshSnapshot } = useSnapshot(ui.follow, ui.sel, starting);
+  const { snap, refresh: refreshSnapshot, flushLog } = useSnapshot(ui.follow, ui.sel, starting);
   const activeVersion = snap.versions.find((v) => v.name === (snap.state.current ?? "")) ?? snap.versions[0] ?? null;
   const catalog: Catalog = useMemo(
     () => (activeVersion ? loadCatalog(activeVersion.path) : EMPTY_CATALOG),
@@ -1015,11 +1048,14 @@ export function Dashboard({
     async (label: string, argv: string[], after?: (code: number) => void): Promise<void> => {
       if (runningRef.current) return;
       runningRef.current = true;
-      setConsole((prev) => [...prev, { text: `▶ ${label}   (r5-server ${argv.join(" ")})`, kind: "head" }]);
+      setConsole((prev) => [
+        ...prev,
+        { text: `▶ ${label}   (r5-server ${argv.join(" ")})`, kind: "head", at: Date.now() },
+      ]);
       setRunning(label);
       const sink = (line: string): void => {
         if (line.trim().length === 0) return;
-        setConsole((prev) => [...prev, { text: line, kind: "out" }]);
+        setConsole((prev) => [...prev, { text: line, kind: "out", at: Date.now() }]);
       };
       let code = 0;
       try {
@@ -1031,9 +1067,14 @@ export function Dashboard({
         runningRef.current = false;
         setRunning(null);
       }
+      // 先收一次日志再写结论行：引擎刚写下的行（控制台回执）该落在「✔」**上面**，
+      // 否则它们要等下一次轮询，反而排到结论后面去。
+      flushLog();
       setConsole((prev) => [
         ...prev,
-        code === 0 ? { text: `✔ ${label} 完成`, kind: "head" } : { text: `✘ ${label} 退出码 ${code}`, kind: "error" },
+        code === 0
+          ? { text: `✔ ${label} 完成`, kind: "head", at: Date.now() }
+          : { text: `✘ ${label} 退出码 ${code}`, kind: "error", at: Date.now() },
       ]);
       if (after) after(code);
       else {
@@ -1048,7 +1089,7 @@ export function Dashboard({
       // announcement rows, ban list ...), so the panel never shows stale rows.
       setReloadKey((k) => k + 1);
     },
-    [runCommand],
+    [runCommand, flushLog],
   );
 
   /** Turn a router action into a captured command run. */
@@ -1069,7 +1110,7 @@ export function Dashboard({
         const versions = snapRef.current.versions;
         const target = newestUpgradeTarget(versions, snapRef.current.state.current);
         if (!target) {
-          setConsole((prev) => [...prev, { text: "已是最新版本，无需升级。", kind: "out" }]);
+          setConsole((prev) => [...prev, { text: "已是最新版本，无需升级。", kind: "out", at: Date.now() }]);
           return;
         }
         void execute(`升级到 ${target}`, ["upgrade", "--to", target, "--yes"]);
@@ -1177,10 +1218,12 @@ export function Dashboard({
       : "";
 
   // ---- console stream ------------------------------------------------------
+  // 引擎日志与面板动作输出是同一条时间线的两半：按各自入账的时刻归并。引擎那半的
+  // 时刻是"面板读到它"的轮询时刻，所以一次启动的横幅一定落在「▶ 启动服务器」之后。
   const combined: { text: string; kind: "game" | "head" | "out" | "error" }[] = [
-    ...snap.logLines.map((text) => ({ text, kind: "game" as const })),
+    ...snap.logLines.map((line) => ({ ...line, kind: "game" as const })),
     ...console_,
-  ];
+  ].toSorted((a, b) => a.at - b.at);
 
   // ---- input ---------------------------------------------------------------
   const ctx: RouteContext = {
@@ -1222,6 +1265,14 @@ export function Dashboard({
     ctxRef.current = ctx;
   });
 
+  // 键盘状态的同步镜像：终端把连按/粘包的多个按键放进同一次读取时，每个事件都会在
+  // 同一次渲染周期里被处理 —— 都从同一份旧状态出发的话，最后只有最后一个按键算数
+  // （连按 ← 只挪一格）。镜像让它们按顺序各自生效。
+  const uiRef = useRef(view);
+  useEffect(() => {
+    uiRef.current = view;
+  });
+
   useInput((input, key) => {
     const ev: KeyEvent = {
       input,
@@ -1237,9 +1288,11 @@ export function Dashboard({
       return: key.return,
       space: input === " ",
       backspace: key.backspace,
+      delete: key.delete,
       ctrl: key.ctrl,
     };
-    const outcome = routeKey(view, ev, ctxRef.current);
+    const outcome = routeKey(uiRef.current, ev, ctxRef.current);
+    uiRef.current = outcome.ui;
     setUi(outcome.ui);
     if (outcome.quit) setQuit(true);
     // `r` is a page key (refresh) outside the settings editor: the router decides,
@@ -1276,10 +1329,10 @@ export function Dashboard({
   const selectedField = fieldById(SETTINGS_FIELDS[view.edit.cursor].id);
   const selectedCfg = view.route === "settings" ? cfgOverridesFor(cfgScan, selectedField.id) : [];
   const footer = view.consoleOpen
-    ? "输入控制台命令（在服务器上执行，输出进日志区）· 回车 执行 · Esc 取消"
+    ? "输入控制台命令（在服务器上执行，输出进日志区）· ←→ 移光标 · 回车 执行 · Esc 取消"
     : view.dialog
       ? view.dialog.kind === "announce"
-        ? "↑↓ 换字段 · ←→ 切换 kind/color · 回车 保存（先过校验）· Esc 取消"
+        ? "↑↓ 换字段 · ←→ 移光标（种类/颜色为换值）· 回车 保存（先过校验）· Esc 取消"
         : "回车 执行（输出进日志区）· Esc 取消"
       : view.route === "players"
         ? "↑↓ 选择玩家 · k 踢出 · b 封禁 · u 解封 · + 加机器人 · - 减 1 个 · c 清空 · r 刷新 · : 控制台 · Esc 返回 · q 退出"
@@ -1289,7 +1342,7 @@ export function Dashboard({
             ? "↑↓ 选择 · a 新增 · d 删除选中 · t 广播 · r 重新读取 · Esc 返回 · q 退出"
             : view.route === "settings"
               ? editMode === "input"
-                ? "输入值 · 退格 删除 · 回车 保存（校验不过会提示）· Esc 取消"
+                ? "输入值 · ←→/Home/End 移光标 · 退格/Delete 删除 · 回车 保存（校验不过会提示）· Esc 取消"
                 : editMode === "pick"
                   ? "↑↓/PgUp/PgDn 选择 · Home/End 首尾 · 回车 选中 · Esc 返回列表"
                   : "↑↓ 选择设置项 · 回车 编辑 · r 恢复默认 · x 立即切换模式（运行中）· Esc 返回主界面 · q 退出"
@@ -1803,7 +1856,7 @@ export function Dashboard({
           <Text color="cyan" bold>
             {"控制台▸ "}
           </Text>
-          <Text>{`${truncate(view.consoleBuffer, columns - 14)}▎`}</Text>
+          <Text>{renderField(view.consoleBuffer, Math.max(8, columns - 13))}</Text>
         </Text>
       ) : null}
 

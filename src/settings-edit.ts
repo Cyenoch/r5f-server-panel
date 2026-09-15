@@ -4,12 +4,21 @@ import { MANUAL_OPTION, type FieldOption, type FieldDef } from "./settings-field
  *
  * Three modes, the way config editors usually work:
  *   browse  move over the fields, Enter opens the editor, r restores a default
- *   input   type a value; Enter validates and saves, Esc cancels
+ *   input   type a value; ←/→/Home/End move the caret, Enter validates and saves, Esc cancels
  *   pick    choose from the field's candidates; the last entry opens the editor
  *
  * No React here: the rules are plain functions over plain state.
  */
 import type { Settings } from "./state";
+import {
+  type TextField,
+  caretToEdge,
+  deleteAtCaret,
+  deleteBefore,
+  insertText,
+  moveCaret,
+  textField,
+} from "./text-field";
 
 export type EditMode = "browse" | "input" | "pick";
 
@@ -17,8 +26,8 @@ export type EditState = {
   /** index into the field list */
   cursor: number;
   mode: EditMode;
-  /** input buffer while mode === "input" */
-  buffer: string;
+  /** text field while mode === "input" (caret included) */
+  buffer: TextField;
   /** index into the option list while mode === "pick" */
   pick: number;
   /** validation error from the last accept attempt */
@@ -29,6 +38,8 @@ export type EditEvent = {
   input: string;
   up: boolean;
   down: boolean;
+  left: boolean;
+  right: boolean;
   pageUp: boolean;
   pageDown: boolean;
   home: boolean;
@@ -36,6 +47,7 @@ export type EditEvent = {
   return: boolean;
   escape: boolean;
   backspace: boolean;
+  delete: boolean;
   ctrl: boolean;
 };
 
@@ -60,7 +72,7 @@ export type EditOutcome = {
 export const initialEditState: EditState = {
   cursor: 0,
   mode: "browse",
-  buffer: "",
+  buffer: textField(""),
   pick: 0,
   error: null,
 };
@@ -99,17 +111,23 @@ export function settingsKey(state: EditState, ev: EditEvent, ctx: EditContext): 
   if (!field) return { state };
 
   if (state.mode === "input") {
-    if (ev.escape) return { state: { ...state, mode: "browse", error: null, buffer: "" } };
-    if (ev.backspace) return { state: { ...state, buffer: state.buffer.slice(0, -1), error: null } };
+    const buffer = state.buffer;
+    if (ev.escape) return { state: { ...state, mode: "browse", error: null, buffer: textField("") } };
+    if (ev.left) return { state: { ...state, buffer: moveCaret(buffer, -1) } };
+    if (ev.right) return { state: { ...state, buffer: moveCaret(buffer, 1) } };
+    if (ev.home) return { state: { ...state, buffer: caretToEdge(buffer, "start") } };
+    if (ev.end) return { state: { ...state, buffer: caretToEdge(buffer, "end") } };
+    if (ev.backspace) return { state: { ...state, buffer: deleteBefore(buffer), error: null } };
+    if (ev.delete) return { state: { ...state, buffer: deleteAtCaret(buffer), error: null } };
     if (ev.return) {
-      const parsed = field.parse(state.buffer);
+      const parsed = field.parse(buffer.text);
       if (!parsed.ok) return { state: { ...state, error: parsed.error } };
       return {
-        state: { ...state, mode: "browse", error: null, buffer: "" },
-        save: { id: field.id, raw: state.buffer },
+        state: { ...state, mode: "browse", error: null, buffer: textField("") },
+        save: { id: field.id, raw: buffer.text },
       };
     }
-    if (isPrintable(ev.input)) return { state: { ...state, buffer: state.buffer + ev.input, error: null } };
+    if (isPrintable(ev.input)) return { state: { ...state, buffer: insertText(buffer, ev.input), error: null } };
     return { state };
   }
 
@@ -139,7 +157,7 @@ export function settingsKey(state: EditState, ev: EditEvent, ctx: EditContext): 
       if (!option) return { state: { ...state, mode: "browse" } };
       if (option.value === MANUAL_OPTION) {
         return {
-          state: { ...state, mode: "input", buffer: String(ctx.values[field.id]), error: null },
+          state: { ...state, mode: "input", buffer: textField(String(ctx.values[field.id])), error: null },
         };
       }
       const parsed = field.parse(option.value);
@@ -170,7 +188,7 @@ export function settingsKey(state: EditState, ev: EditEvent, ctx: EditContext): 
         },
       };
     }
-    return { state: { ...state, mode: "input", buffer: field.editText(ctx.values), error: null } };
+    return { state: { ...state, mode: "input", buffer: textField(field.editText(ctx.values)), error: null } };
   }
   if (ev.input === "r") {
     const raw = String(field.defaultValue);

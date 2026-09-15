@@ -5,6 +5,7 @@
 import * as readline from "node:readline/promises";
 import cliTruncate from "cli-truncate";
 import stringWidth from "string-width";
+import { type TextField, splitAtCaret } from "./text-field";
 
 // `isTTY` is `undefined` — not `false` — when the stream is not a TTY, so fall back explicitly.
 const colorEnabled = (process.stdout.isTTY ?? false) && process.env.NO_COLOR === undefined;
@@ -35,6 +36,41 @@ export function truncate(text: string, width: number): string {
 /** One fixed-width cell: clip to `width`, then pad to exactly `width`. */
 export function fitLine(text: string, width: number): string {
   return padEndWidth(truncate(text, width), width);
+}
+
+/** The caret glyph (▎) every editable line draws at the insertion point. */
+const CARET = "\u258e";
+
+/**
+ * A text field as one terminal line, caret included.
+ *
+ * The caret always stays inside `width`: the head is clipped to a whole number of
+ * glyphs, and while there is text after the caret at least half the line is kept
+ * for it — otherwise typing into a long value hides what follows the caret.
+ */
+export function renderField(field: TextField, width: number, marker: string = CARET): string {
+  const { before, after } = splitAtCaret(field);
+  const markerWidth = stringWidth(marker);
+  if (stringWidth(before) + markerWidth + stringWidth(after) <= width) return `${before}${marker}${after}`;
+  const room = Math.max(1, width - markerWidth);
+  const head = tailWidth(before, after.length > 0 ? Math.max(1, Math.floor(room / 2)) : room);
+  return `${head}${marker}${truncate(after, Math.max(0, room - stringWidth(head)))}`;
+}
+
+/** The trailing part of `text` that fits `width` cells, cut on code-point boundaries. */
+function tailWidth(text: string, width: number): string {
+  let start = text.length;
+  let used = 0;
+  while (start > 0) {
+    // 反着量整个码点：单独出现的低代理说明它的高代理就在前一格。
+    const unit = text.charCodeAt(start - 1);
+    const back = unit >= 0xdc00 && unit <= 0xdfff && start >= 2 ? 2 : 1;
+    const size = stringWidth(text.slice(start - back, start));
+    if (used + size > width) break;
+    used += size;
+    start -= back;
+  }
+  return text.slice(start);
 }
 
 export function header(title: string): void {

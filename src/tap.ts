@@ -252,17 +252,82 @@ export function selfCommand(extraArgs: string[]): string[] {
 
 /** Last `count` lines of a file, read from the tail without loading everything. */
 export function readTail(path: string, count: number): string[] {
-  if (!existsSync(path)) return [];
+  return readTailState(path, count).lines;
+}
+
+/**
+ * 最后一个整行的结束位置：`cut` 是不含行尾符的字符下标（-1 = 窗口里没有换行），
+ * `terminator` 是行尾符占的字节数（`\n` 或 `\r\n`）。
+ */
+function lastLineEnd(text: string): { cut: number; terminator: number } {
+  const newline = text.lastIndexOf("\n");
+  if (newline < 0) return { cut: -1, terminator: 0 };
+  const crlf = newline > 0 && text[newline - 1] === "\r";
+  return { cut: crlf ? newline - 1 : newline, terminator: crlf ? 2 : 1 };
+}
+
+/**
+ * 尾部整窗 + 已读到的字节位置。
+ *
+ * `offset` 永远落在**整行**边界上：末行如果还没写完（没有换行收尾），它留给下一次读，
+ * 水位线停在它的起点 —— 面板据此增量跟日志（`readDelta`），半行不会被当成整行，也不会
+ * 重复显示。
+ */
+export function readTailState(path: string, count: number): { lines: string[]; offset: number } {
+  if (!existsSync(path)) return { lines: [], offset: 0 };
   const size = statSync(path).size;
   const windowBytes = Math.min(size, Math.max(64 * 1024, count * 400));
   const fd = openSync(path, "r");
   try {
     const buffer = Buffer.alloc(windowBytes);
     readSync(fd, buffer, 0, windowBytes, size - windowBytes);
-    const lines = buffer.toString("utf8").split(/\r?\n/);
+    const text = buffer.toString("utf8");
+    const { cut, terminator } = lastLineEnd(text);
+    // 窗口里一个换行都没有（latest.txt 这类单行文件）：整段算一行，水位线到文件末尾。
+    if (cut < 0) return { lines: trimTail(text.split(/\r?\n/), count), offset: size };
+    const complete = text.slice(0, cut);
+    const lines = complete.split(/\r?\n/);
     if (size > windowBytes && lines.length > 0) lines.shift(); // partial first line
-    while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
-    return lines.slice(-count);
+    return {
+      lines: trimTail(lines, count),
+      offset: size - windowBytes + Buffer.byteLength(complete, "utf8") + terminator,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** 丢掉尾部空行，只留最后 `count` 行（一个窗口里可能装得下更多行）。 */
+function trimTail(lines: string[], count: number): string[] {
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  return lines.slice(-count);
+}
+
+/**
+ * `offset` 之后新增的行与新的水位线。
+ *
+ * 日志只会追加，所以只看水位线后面的字节；文件被换掉或截断（size < offset）返回 null，
+ * 调用方按"新文件"整窗重读。末行没写完时它留给下一次读 —— 水位线必须一直停在整行边界上，
+ * 否则半行会变成一行、还会把断掉的多字节字符写进去。
+ */
+export function readDelta(path: string, offset: number): { lines: string[]; offset: number } | null {
+  let size = 0;
+  try {
+    size = statSync(path).size;
+  } catch {
+    return null;
+  }
+  if (size < offset) return null;
+  if (size === offset) return { lines: [], offset };
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.alloc(size - offset);
+    readSync(fd, buffer, 0, buffer.length, offset);
+    const text = buffer.toString("utf8");
+    const { cut, terminator } = lastLineEnd(text);
+    if (cut < 0) return { lines: [], offset };
+    const complete = text.slice(0, cut);
+    return { lines: complete.split(/\r?\n/), offset: offset + Buffer.byteLength(complete, "utf8") + terminator };
   } finally {
     closeSync(fd);
   }

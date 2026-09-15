@@ -8,14 +8,23 @@ import type { CapabilityId } from "./inspect";
 import { type EditState, type EditEvent, initialEditState, isPrintable, settingsKey } from "./settings-edit";
 import type { FieldDef, FieldId, FieldOption } from "./settings-fields";
 import type { Settings } from "./state";
+import {
+  type TextField,
+  caretToEdge,
+  deleteAtCaret,
+  deleteBefore,
+  insertText,
+  moveCaret,
+  textField,
+} from "./text-field";
 
 export type Route = "main" | "detail" | "doctor" | "config" | "settings" | "players" | "banlist" | "announce";
 
 /** One player as the router sees it; `bot` is `uniqueid === "0"` (发实测判据). */
 export type PlayerTarget = { userid: string; uniqueid: string; name: string; bot: boolean };
 
-/** The announcement form is one CSV row plus the focused column index. */
-export type AnnounceForm = Announcement & { field: number };
+/** The announcement form is one CSV row, the focused column index and that cell's caret. */
+export type AnnounceForm = Announcement & { field: number; caret: number };
 
 /** The modal slot: every page shares one dialog at a time. */
 export type DialogState =
@@ -59,9 +68,9 @@ export type UiState = {
   edit: EditState;
   /** cursor in the player list */
   playerCursor: number;
-  /** one-line console prompt (``:`` opens it) */
+  /** one-line console prompt (``:`` opens it), with its own caret */
   consoleOpen: boolean;
-  consoleBuffer: string;
+  consoleBuffer: TextField;
   /** selected row of the announcements list */
   annCursor: number;
   /** first visible row of the announcements list */
@@ -132,7 +141,7 @@ export const initialUi: UiState = {
   edit: initialEditState,
   playerCursor: 0,
   consoleOpen: false,
-  consoleBuffer: "",
+  consoleBuffer: textField(""),
   annCursor: 0,
   annScroll: 0,
   dialog: null,
@@ -209,16 +218,16 @@ export function announcementRow(form: AnnounceForm): Announcement {
   };
 }
 
-/** One cell of the form. `kind` only ever receives the two documented values. */
-function withCell(form: AnnounceForm, key: keyof Announcement, value: string): AnnounceForm {
-  const next: AnnounceForm = { ...form };
-  if (key === "tag") next.tag = value;
-  else if (key === "text") next.text = value;
-  else if (key === "color") next.color = value;
-  else if (key === "sustain") next.sustain = value;
-  else if (key === "fade") next.fade = value;
-  else if (key === "wait") next.wait = value;
-  else next.kind = value === "welcome" ? "welcome" : "rotate";
+/** One cell of the form, caret included. `kind` only ever receives the two documented values. */
+function withCell(form: AnnounceForm, key: keyof Announcement, cell: TextField): AnnounceForm {
+  const next: AnnounceForm = { ...form, caret: cell.caret };
+  if (key === "tag") next.tag = cell.text;
+  else if (key === "text") next.text = cell.text;
+  else if (key === "color") next.color = cell.text;
+  else if (key === "sustain") next.sustain = cell.text;
+  else if (key === "fade") next.fade = cell.text;
+  else if (key === "wait") next.wait = cell.text;
+  else next.kind = cell.text === "welcome" ? "welcome" : "rotate";
   return next;
 }
 
@@ -261,19 +270,31 @@ function announceFormKey(ui: UiState, ev: KeyEvent, dialog: Extract<DialogState,
   const form = dialog.form;
   const field = ANNOUNCE_FIELDS[Math.min(Math.max(0, form.field), ANNOUNCE_FIELDS.length - 1)];
   const edit = (next: AnnounceForm): RouteOutcome => ({ ui: { ...ui, dialog: { kind: "announce", form: next } } });
+  const focus = (index: number): AnnounceForm => {
+    const next = ANNOUNCE_FIELDS[Math.min(Math.max(0, index), ANNOUNCE_FIELDS.length - 1)];
+    return { ...form, field: Math.min(Math.max(0, index), ANNOUNCE_FIELDS.length - 1), caret: form[next].length };
+  };
+  // `kind`/`color` are pick-lists: ←→ 换值 is their own shortcut, so the caret only
+  // moves on the free-text rows. `color` still accepts typing (自定义 RGB)，caret 停在末尾。
+  const caretFree = field !== "kind" && field !== "color";
+  const cell: TextField = { text: form[field], caret: form.caret };
 
   if (ev.escape) return { ui: { ...ui, dialog: null } };
-  if (ev.up || ev.pageUp) return edit({ ...form, field: Math.max(0, form.field - 1) });
-  if (ev.down || ev.pageDown) return edit({ ...form, field: Math.min(ANNOUNCE_FIELDS.length - 1, form.field + 1) });
-  if (ev.home) return edit({ ...form, field: 0 });
-  if (ev.end) return edit({ ...form, field: ANNOUNCE_FIELDS.length - 1 });
+  if (ev.up || ev.pageUp) return edit(focus(form.field - 1));
+  if (ev.down || ev.pageDown) return edit(focus(form.field + 1));
+  if (ev.home) return edit(focus(0));
+  if (ev.end) return edit(focus(ANNOUNCE_FIELDS.length - 1));
   if (field === "kind" && (ev.left || ev.right || ev.space)) {
-    return edit(withCell(form, "kind", nextInList(ANNOUNCE_KINDS, form.kind, ev.left ? -1 : 1)));
+    const kind = nextInList(ANNOUNCE_KINDS, form.kind, ev.left ? -1 : 1);
+    return edit(withCell(form, "kind", textField(kind)));
   }
   if (field === "color" && (ev.left || ev.right)) {
-    return edit(withCell(form, "color", nextInList(ANNOUNCE_COLORS, form.color, ev.left ? -1 : 1)));
+    return edit(withCell(form, "color", textField(nextInList(ANNOUNCE_COLORS, form.color, ev.left ? -1 : 1))));
   }
-  if (ev.backspace) return edit(withCell(form, field, form[field].slice(0, -1)));
+  if (caretFree && ev.left) return edit(withCell(form, field, moveCaret(cell, -1)));
+  if (caretFree && ev.right) return edit(withCell(form, field, moveCaret(cell, 1)));
+  if (field !== "kind" && ev.backspace) return edit(withCell(form, field, deleteBefore(cell)));
+  if (field !== "kind" && ev.delete) return edit(withCell(form, field, deleteAtCaret(cell)));
   if (ev.return) {
     const errors = validateAnnouncement(announcementRow(form));
     if (errors.length > 0) return { ui, notice: `未保存：${errors[0]}` };
@@ -282,7 +303,7 @@ function announceFormKey(ui: UiState, ev: KeyEvent, dialog: Extract<DialogState,
       run: { args: announceAddArgv(form), label: `新增公告：${form.text}` },
     };
   }
-  if (field !== "kind" && isPrintable(ev.input)) return edit(withCell(form, field, form[field] + ev.input));
+  if (field !== "kind" && isPrintable(ev.input)) return edit(withCell(form, field, insertText(cell, ev.input)));
   return { ui };
 }
 
@@ -316,15 +337,21 @@ function switchMode(ui: UiState, ctx: RouteContext): RouteOutcome {
 export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOutcome {
   // The console prompt owns the keyboard while it is open: `q` is a character.
   if (ui.consoleOpen) {
-    if (ev.escape) return { ui: { ...ui, consoleOpen: false, consoleBuffer: "" } };
-    if (ev.backspace) return { ui: { ...ui, consoleBuffer: ui.consoleBuffer.slice(0, -1) } };
+    const line = ui.consoleBuffer;
+    if (ev.escape) return { ui: { ...ui, consoleOpen: false, consoleBuffer: textField("") } };
+    if (ev.left) return { ui: { ...ui, consoleBuffer: moveCaret(line, -1) } };
+    if (ev.right) return { ui: { ...ui, consoleBuffer: moveCaret(line, 1) } };
+    if (ev.home) return { ui: { ...ui, consoleBuffer: caretToEdge(line, "start") } };
+    if (ev.end) return { ui: { ...ui, consoleBuffer: caretToEdge(line, "end") } };
+    if (ev.backspace) return { ui: { ...ui, consoleBuffer: deleteBefore(line) } };
+    if (ev.delete) return { ui: { ...ui, consoleBuffer: deleteAtCaret(line) } };
     if (ev.return) {
-      const line = ui.consoleBuffer.trim();
-      const closed = { ...ui, consoleOpen: false, consoleBuffer: "" };
-      if (line.length === 0) return { ui: closed };
-      return { ui: closed, run: { args: ["console", line], label: `控制台：${line}` } };
+      const command = line.text.trim();
+      const closed = { ...ui, consoleOpen: false, consoleBuffer: textField("") };
+      if (command.length === 0) return { ui: closed };
+      return { ui: closed, run: { args: ["console", command], label: `控制台：${command}` } };
     }
-    if (isPrintable(ev.input)) return { ui: { ...ui, consoleBuffer: ui.consoleBuffer + ev.input } };
+    if (isPrintable(ev.input)) return { ui: { ...ui, consoleBuffer: insertText(line, ev.input) } };
     return { ui };
   }
 
@@ -410,6 +437,7 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
     if (ev.input === "a") {
       const form: AnnounceForm = {
         field: 0,
+        caret: 0,
         kind: "rotate",
         tag: "",
         text: "",
