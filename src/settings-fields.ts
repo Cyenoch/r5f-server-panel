@@ -267,6 +267,32 @@ export const SETTINGS_FIELDS: FieldDef[] = [
     },
   },
   {
+    id: "announceRotate",
+    label: "公告轮播",
+    kind: "enum",
+    engineName: "bridge_chat_announce",
+    hint: "开启后引擎会把公告文案轮播给在线玩家，并在玩家进入时发欢迎语；关闭（引擎默认）则一条都不发。运行中可在公告页按 t 立即开关。",
+    spec: "开启 / 关闭（引擎默认）",
+    scope: "重启服务器后生效；运行中可在公告页立即开关",
+    display: (s) => (s.announceRotate === "on" ? "开启（轮播 + 进场欢迎）" : "关闭（引擎默认，不发公告）"),
+    defaultText: () => "关闭（引擎默认）",
+    defaultValue: "default",
+    assign: (s, value) => {
+      s.announceRotate = value === "on" ? "on" : "default";
+    },
+    editText: (s) => s.announceRotate,
+    options: () => [
+      { value: "default", label: "关闭（引擎默认）", note: "引擎不广播任何公告" },
+      { value: "on", label: "开启", note: "按文案表轮播，并给进入的玩家发欢迎语" },
+      { value: MANUAL_OPTION, label: "（手动输入…）" },
+    ],
+    parse: (raw) => {
+      const text = raw.trim();
+      if (text === "default" || text === "on") return { ok: true, value: text };
+      return { ok: false, error: "只能是 default 或 on" };
+    },
+  },
+  {
     id: "port",
     label: "端口（UDP）",
     kind: "int",

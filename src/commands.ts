@@ -24,7 +24,15 @@ import { type Announcement, collectAnnouncements, renderAnnouncements, validateA
 import { type ModeFamily, collectModes, mapsForPlaylist } from "./catalog";
 import { syncLaunchSettings } from "./cfg";
 import { type Section, type Tone, collectDetail, collectDoctor, collectHealth } from "./inspect";
-import { type Receipt, type ReceiptKind, classifyReceipt } from "./receipt";
+import {
+  type ModerationEntry,
+  addRecord,
+  describeExpiry,
+  loadModeration,
+  markUnbannedByTarget,
+  moderationPath,
+} from "./moderation";
+import { type Receipt, type ReceiptKind, classifyReceipt, normaliseLogLine } from "./receipt";
 import { currentVersion, describe } from "./serverinfo";
 import { SETTINGS_FIELDS, type FieldId, applyFieldValue, fieldById } from "./settings-fields";
 import {
@@ -237,6 +245,8 @@ function buildArgs(s: Settings): string[] {
   if (s.map.length > 0) args.push("+map", s.map);
   // 1v1 对战统计外发开关：引擎自述 `fs_stats_url` 置空即关闭，值是空串。
   if (s.statsUpload === "off") args.push("+fs_stats_url", "");
+  // 公告轮播：引擎 cvar 默认 0（一条都不发，实测 `help bridge_chat_announce` → def. "0"）。
+  if (s.announceRotate === "on") args.push("+bridge_chat_announce", "1");
   if (s.extra.length > 0) args.push(...s.extra.split(/\s+/).filter(Boolean));
   return args;
 }
@@ -401,6 +411,8 @@ export async function cmdStart(state: State, opts: StartOptions): Promise<number
         "0",
         "--ctl-token",
         ctlToken,
+        "--root",
+        ROOT,
       ]),
       cwd: ROOT,
       stdin: "ignore",
@@ -1239,7 +1251,7 @@ export async function consoleWithReceipt(state: State, line: string, waitMs = 12
 const RECEIPT_LABELS: Record<ReceiptKind, (receipt: Receipt) => string> = {
   success: (receipt) => `执行结果：成功（${receipt.detail}）`,
   unknown: (receipt) => `执行结果：命令不存在（${receipt.detail}）`,
-  usage: (receipt) => `执行结果：用法错误（${receipt.detail}）`,
+  usage: (receipt) => `执行结果：用法错误或被拒（${receipt.detail}）`,
   silent: (receipt) =>
     receipt.lines.length === 0
       ? "执行结果：已发送（引擎无回执）—— 命令存在（未知命令引擎必定报错），但引擎没有任何输出，无法确认执行成功"
@@ -1249,6 +1261,43 @@ const RECEIPT_LABELS: Record<ReceiptKind, (receipt: Receipt) => string> = {
 /** 回执的中文结论（CLI 与面板共用同一套文案）。 */
 export function receiptLabel(receipt: Receipt): string {
   return RECEIPT_LABELS[receipt.kind](receipt);
+}
+
+export type ConVarRead = { found: boolean; value: string | null; lines: string[] };
+
+/**
+ * `help <name>` 的回显（实测 1.0.13 三种形态）：
+ *   `"bridge_chat_announce" = "1" ( def. "0" ) release  - …`   —— 设过值
+ *   `"bridge_chat_announce" = "0" release               - …`   —— 等于默认值（没有 def 段）
+ *   `"ban"  release  - Bans a client … ( ban <userId> )`        —— 是命令，不是 cvar
+ * 值必须紧跟在 `=` 后面（引号里取到闭引号为止），别把后面的描述文字一起吃进来。
+ */
+const CONVAR_VALUE = /^"([A-Za-z0-9_]+)"\s*=\s*(?:"([^"]*)"|(\S+))/;
+
+/**
+ * 读一个 cvar 的当前值。引擎没有"打印 cvar"的独立命令，但 `help <name>` 会连值一起回，
+ * 而且 `help` 查不到时会明确说 `help:  no cvar or command named x`（实测）—— 这就是回执。
+ */
+export async function readConVar(state: State, name: string, waitMs = 1200): Promise<ConVarRead> {
+  const receipt = await consoleWithReceipt(state, `help ${name}`, waitMs);
+  for (const line of receipt.lines) {
+    const match = CONVAR_VALUE.exec(line.trim());
+    if (match && match[1] === name) return { found: true, value: match[2] ?? match[3] ?? "", lines: receipt.lines };
+  }
+  return { found: false, value: null, lines: receipt.lines };
+}
+
+export type ConVarWrite = { ok: boolean; before: string | null; after: string | null; sent: Receipt };
+
+/**
+ * 写一个 cvar 并**读回确认**：赋值本身引擎一个字都不回（实测 `bridge_chat_announce 1`
+ * 静默），所以"发送成功"不能当"值确实变了"。这里设完再读一次，值不等就不算成功。
+ */
+export async function setConVar(state: State, name: string, value: string): Promise<ConVarWrite> {
+  const before = await readConVar(state, name);
+  const sent = await consoleWithReceipt(state, `${name} ${value}`);
+  const after = await readConVar(state, name);
+  return { ok: after.found && after.value === value, before: before.value, after: after.value, sent };
 }
 
 /** 静默是暗色，不是绿色：它只说明"发出去了"。 */
@@ -1412,12 +1461,123 @@ export async function cmdPlayers(state: State, opts: { json?: boolean } = {}): P
 
 export type ModerateOptions = { json?: boolean; minutes?: number; reason?: string };
 
+/** 临时封禁上限：7 天。再长就不是"临时处置"了，直接用永久封禁。 */
+const MAX_TEMP_BAN_MINUTES = 7 * 24 * 60;
+
+type Resolved = { id64: string; name: string; userid: string };
+
+/**
+ * 封禁记录要能自动解封，就必须拿到 id64 —— 引擎的解封形式是 `unban "<userId>"/"<ipAddress>"`
+ * （实测 `help unban`），userid 是会话内的槽位号，重启后没意义。
+ */
+async function resolveTarget(
+  state: State,
+  target: string,
+): Promise<{ ok: true; player: Resolved } | { ok: false; error: string }> {
+  const wanted = target.trim();
+  if (/^\d{15,20}$/.test(wanted)) return { ok: true, player: { id64: wanted, name: "", userid: wanted } };
+  const result = await fetchPlayers(state);
+  if (result.error) return { ok: false, error: result.error };
+  const player = result.players.find((row) => row.userid === wanted || row.uniqueid === wanted);
+  if (!player) return { ok: false, error: `在线列表里没有 userid/id64 = ${wanted} 的玩家。` };
+  if (player.uniqueid === "0")
+    return { ok: false, error: `「${stripName(player.name)}」是机器人（没有 id64），机器人封不了 —— 只能踢。` };
+  return { ok: true, player: { id64: player.uniqueid, name: stripName(player.name), userid: player.userid } };
+}
+
+/** `status` 行的名字带引号（实测 `"bot0"`）—— 显示与按名字重试都要去掉。 */
+function stripName(name: string): string {
+  return name.replace(/^"+|"+$/g, "");
+}
+
+/** 带记录的封禁：先发引擎命令，再记本地台账（见 `moderation.ts` 的说明）。 */
+async function banWithRecord(state: State, target: string, opts: ModerateOptions): Promise<number> {
+  const minutes = opts.minutes ?? 0;
+  const reason = (opts.reason ?? "").trim();
+  if (!Number.isInteger(minutes) || minutes < 0) {
+    console.log(red("  --minutes 需要 ≥ 0 的整数（0 或不写 = 永久）。"));
+    return 1;
+  }
+  if (minutes > MAX_TEMP_BAN_MINUTES) {
+    console.log(red(`  --minutes 最大 ${MAX_TEMP_BAN_MINUTES}（7 天）。更久请用不带 --minutes 的永久封禁。`));
+    return 1;
+  }
+  const resolved = await resolveTarget(state, target);
+  if (!resolved.ok) {
+    console.log(red(`  ${resolved.error}`));
+    console.log(dim("  没有向引擎发送任何封禁指令（只读查了在线名单）。查名单：r5-server players"));
+    return resolved.error.includes("控制通道") || resolved.error.includes("没有正在运行") ? 2 : 1;
+  }
+  let receipt: Receipt;
+  try {
+    receipt = await consoleWithReceipt(state, `ban "${target.trim()}"`);
+  } catch (err) {
+    if (err instanceof NoControlChannelError) {
+      console.log(red(`  ${err.message}`));
+      return 2;
+    }
+    console.log(red(`  ${err instanceof Error ? err.message : String(err)}`));
+    return 1;
+  }
+  if (receipt.kind === "unknown" || receipt.kind === "usage") {
+    console.log(RECEIPT_TONE[receipt.kind](receiptLabel(receipt)));
+    console.log(dim("  引擎拒绝/不认这条命令 —— 没有写本地记录。"));
+    return 1;
+  }
+  const now = Date.now();
+  const entry: ModerationEntry = {
+    id: randomUUID(),
+    target: target.trim(),
+    id64: resolved.player.id64,
+    name: resolved.player.name,
+    reason,
+    minutes,
+    issuedAt: now,
+    expiresAt: minutes > 0 ? now + minutes * 60_000 : 0,
+    state: "pending",
+  };
+  addRecord(ROOT, entry);
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          action: "ban",
+          target: entry.target,
+          id64: entry.id64,
+          name: entry.name,
+          minutes,
+          reason,
+          expiresAt: entry.expiresAt > 0 ? new Date(entry.expiresAt).toISOString() : null,
+          receipt: { kind: receipt.kind, detail: receipt.detail },
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
+  console.log(RECEIPT_TONE[receipt.kind](receiptLabel(receipt)));
+  console.log(green(`  已记入本机台账：${entry.name || entry.id64}（id64 ${entry.id64}）`));
+  if (minutes > 0) {
+    console.log(dim(`  到期自动解封：${describeExpiry(entry, now)}`));
+    console.log(dim("  解封由日志守护在到期时发 `unban` —— 守护随实例存活；实例停着时不会执行。"));
+  } else {
+    console.log(dim("  永久封禁（无到期）。原因只记在本机，引擎不保存。"));
+  }
+  console.log(dim("  注意：引擎对 `ban` 不回话，所以这里只能说“命令已发出”，封没封上要玩家端确认。"));
+  return 0;
+}
+
 /**
  * Kick/ban/unban by userid or id64（ticket 03 冻结的形式）。
  *
- * 实测补充（本机 r5f-dedi 1.0.13 托管实例，2026-09-14）：`kick "<userid>"` 对机器人
- * 静默且不生效，而 `kick "<玩家名>"` 回 `Kicked '…' from server`。这里保持 ticket 的
- * 形式不动，但"静默"就如实说静默；`bots clear` 里补了按名字重试的回退。
+ * 实测补充（本机 r5f-dedi 1.0.13 托管实例）：`kick "<userid>"` 对机器人静默且不生效，
+ * 而 `kick "<玩家名>"` 回 `Kicked '…' from server`。这里保持 ticket 的形式不动，
+ * 但"静默"就如实说静默；`bots clear` 里补了按名字重试的回退。
+ *
+ * 封禁的时长/原因（ticket 03 当时判定"做不了"）现在由本机台账兑现：命令层仍然是引擎那条
+ * `ban "<target>"`（引擎没有别的形式，实测 `help ban` → `ban <userId>`），时长/原因/到期
+ * 记在 `moderation.json` 里，到期由日志守护发 `unban`。
  */
 export async function cmdModerate(
   state: State,
@@ -1430,19 +1590,52 @@ export async function cmdModerate(
     console.log(red(`用法：r5-server ${action} <userid|id64>`));
     return 1;
   }
-  // 拒绝路径必须在任何 controlSend / logWatermark 之前返回 —— 一个字节都不发给引擎。
-  // 自证方式：`logWatermark(runtime.logFile)` 在拒绝前后相等（ticket 03 验收 2）。
   if (action === "ban" && (opts.minutes !== undefined || opts.reason !== undefined)) {
-    console.log(red("  不支持 --minutes / --reason。"));
-    console.log(dim("  封禁的时长与原因属于 Spire 侧的封禁模型（引擎里的 banType / banExpires 字段），"));
-    console.log(dim('  本地控制台命令 `ban "<target>"` 只有目标参数 —— 带时长/原因的形式未经实证。'));
-    console.log(dim(`  想自己试验：r5-server console 'ban "${trimmed}" 60 "原因"'`));
-    console.log(dim("  引号必须原样传给引擎（实测 kick 不带引号无效）；该形式未经验证："));
-    console.log(dim("  引擎对 ban 一律静默，不会回报成功或失败。本次没有向引擎发送任何字节。"));
-    return 1;
+    return banWithRecord(state, trimmed, opts);
   }
   const line = action === "unban" ? `unban "${trimmed}"` : `${action} "${trimmed}"`;
-  return cmdConsole(state, [line], { json: opts.json });
+  const code = await cmdConsole(state, [line], { json: opts.json });
+  if (action === "unban" && code === 0) {
+    const marked = markUnbannedByTarget(ROOT, trimmed, Date.now());
+    if (marked > 0 && !opts.json) console.log(dim(`  已把本机台账里 ${marked} 条对应记录标为「已解除」。`));
+  }
+  return code;
+}
+
+/**
+ * 禁言：引擎里**没有**本地禁言命令 —— 实测 `help mute` → `no cvar or command named mute`，
+ * `server.dll` 里也没有。通讯封禁是 R5F/Spire 平台侧的概念（全局聊天封禁名单，
+ * 由 `sv_applyGlobalCommsBans` / `sv_commsBansAreGameBans` 决定怎么用），本地控制台无法给
+ * 单个玩家打标记。所以这里如实拒绝，并把引擎那两个开关的当前值读出来给操作者看。
+ */
+export async function cmdMute(state: State, target: string | undefined): Promise<number> {
+  const wanted = (target ?? "").trim();
+  header("禁言（通讯封禁）");
+  console.log("  引擎没有本地禁言命令：本机控制台发不出“只堵这个人的聊天”的指令。");
+  console.log("  通讯封禁是 R5F 平台侧的全局聊天封禁名单，引擎只用两个开关决定怎么对待它：");
+  const running = Boolean(state.runtime?.ctlPort && state.runtime.ctlToken);
+  for (const [name, label] of [
+    ["sv_applyGlobalCommsBans", "使用全局聊天封禁名单（0 无 / 1 文字 / 2 语音 / 3 两者）"],
+    ["sv_commsBansAreGameBans", "把聊天封禁当成游戏封禁（0/1）"],
+  ] as const) {
+    if (!running) {
+      kv(label, "实例未运行，读不到当前值");
+      continue;
+    }
+    try {
+      const read = await readConVar(state, name);
+      kv(label, read.found ? `引擎回报 = "${read.value ?? ""}"` : "引擎没回这个 cvar（可能被版本移除）");
+    } catch (err) {
+      kv(label, err instanceof Error ? err.message : String(err));
+    }
+  }
+  if (wanted.length === 0) {
+    console.log(dim("\n  本机可用的处置：踢（kick）、封禁（ban，可带 --minutes/--reason）。"));
+    return 0;
+  }
+  console.log(red(`\n  没有对「${wanted}」执行任何操作 —— 没有发送任何禁言指令（只读查了上面两个开关）。`));
+  console.log(dim("  想让他闭嘴又不想踢人：只能等 R5F 平台侧的通讯封禁，或本地永久/临时封禁（ban）。"));
+  return 1;
 }
 
 // -------------------------------------------------------------------- bots
@@ -1647,6 +1840,9 @@ export async function cmdBanlist(state: State, opts: BanlistOptions = {}): Promi
     }
   }
 
+  const ledger = loadModeration(ROOT);
+  const now = Date.now();
+
   if (opts.json) {
     console.log(
       JSON.stringify(
@@ -1654,6 +1850,7 @@ export async function cmdBanlist(state: State, opts: BanlistOptions = {}): Promi
           path: file ?? null,
           reload: reload ? { kind: reload.kind, detail: reload.detail } : null,
           entries: parsed,
+          local: { path: moderationPath(ROOT), entries: ledger.entries },
           error: parseError.length > 0 ? parseError : null,
         },
         null,
@@ -1664,19 +1861,19 @@ export async function cmdBanlist(state: State, opts: BanlistOptions = {}): Promi
   }
 
   header("封禁名单");
+  printLedger(ledger.entries, now);
+  console.log("");
   if (!version) {
-    console.log(red("  未选择版本目录，无法定位 banlist.json。"));
+    console.log(red("  未选择版本目录，无法定位引擎的 banlist.json。"));
     return 1;
   }
   if (!file) {
-    console.log(
-      yellow("  没有找到 banlist.json —— 引擎只在真正写入过封禁记录后才会生成它（本机实测至今没有该文件）。"),
-    );
+    console.log(dim("  引擎自己的封禁名单：本机还没有 banlist.json（引擎只在真正写入过封禁记录后才生成）。"));
     console.log(dim(`  查找过：${candidates.join("、")}`));
-    console.log(dim("  先让引擎重新加载名单：r5-server banlist --reload"));
+    console.log(dim("  让引擎重新加载名单：r5-server banlist --reload"));
     return 0;
   }
-  kv("文件", file);
+  kv("引擎名单文件", file);
   if (parseError.length > 0) {
     console.log(red(`  无法解析：${parseError}`));
     return 1;
@@ -1684,6 +1881,29 @@ export async function cmdBanlist(state: State, opts: BanlistOptions = {}): Promi
   printValues(parsed, "  ");
   console.log(dim("\n  字段名由引擎决定，这里原样呈现，不做解释。"));
   return 0;
+}
+
+/** 本机台账：临时封禁的时长/原因/到期只有这里有（引擎不保存）。 */
+function printLedger(entries: ModerationEntry[], now: number): void {
+  console.log(bold("  本机封禁台账"));
+  console.log(dim(`    ${moderationPath(ROOT)}（本工具记录；引擎不保存原因与到期）`));
+  if (entries.length === 0) {
+    console.log(dim("    还没有记录。带 --minutes/--reason 的 ban 会在这里留痕。"));
+    return;
+  }
+  for (const entry of entries.slice(0, 20)) {
+    const who = entry.name.length > 0 ? `${entry.name}（id64 ${entry.id64}）` : `id64 ${entry.id64}`;
+    const kind = entry.minutes > 0 ? `临时 ${entry.minutes} 分钟` : "永久";
+    const mark =
+      entry.state === "unbanned"
+        ? green("已解除")
+        : entry.minutes > 0 && entry.expiresAt <= now
+          ? yellow("到期未解封")
+          : yellow("封禁中");
+    console.log(`    ${mark} ${who} · ${kind} · ${describeExpiry(entry, now)}`);
+    if (entry.reason.length > 0) console.log(dim(`      原因：${entry.reason}`));
+  }
+  if (entries.length > 20) console.log(dim(`    （还有 ${entries.length - 20} 条，见上面那个文件）`));
 }
 
 // ----------------------------------------------------------- announcements
@@ -1731,8 +1951,10 @@ export async function cmdAnnouncements(
         `  ${String(index + 1).padStart(2)}  ${padEndWidth(row.kind, 8)} ${padEndWidth(row.tag, 16)} ${padEndWidth(row.color, 10)} ${padEndWidth(row.wait, 5)} ${row.text}`,
       );
     });
-    console.log(dim("\n  改动在 changelevel 或重启后生效（引擎文件头自述）。"));
-    console.log(dim('  新增：announcements add --text "…"   删除：announcements remove <序号>   广播：announce'));
+    console.log(dim("  改动在 changelevel 或重启后生效（引擎文件头自述）。"));
+    console.log(
+      dim('  新增：announcements add --text "…"   删除：announcements remove <序号>   轮播开关：announce on|off'),
+    );
     return 0;
   }
 
@@ -1760,7 +1982,7 @@ export async function cmdAnnouncements(
     const rows = [...file.rows, row];
     writeFileSync(file.path, renderAnnouncements({ ...file, rows }), "utf8");
     console.log(green(`  已追加第 ${rows.length} 条（${file.path}）`));
-    console.log(dim("  改动在 changelevel 或重启后生效（引擎文件头自述）；立即广播已有文案：r5-server announce"));
+    console.log(dim("  改动在 changelevel 或重启后生效（引擎文件头自述）；轮播开关：r5-server announce on"));
     return 0;
   }
 
@@ -1777,13 +1999,117 @@ export async function cmdAnnouncements(
   return 0;
 }
 
-/** `announce`：bridge_chat_announce（实测存在、无回执）。 */
-export async function cmdAnnounce(state: State, opts: { json?: boolean } = {}): Promise<number> {
-  const code = await sendWithReceipt(state, "bridge_chat_announce", { json: opts.json });
-  if (code === 0 && !opts.json) {
-    console.log(dim("  已广播（引擎无确认回执）：效果需真人在场确认；文案改动在 changelevel 或重启后生效。"));
+/**
+ * 公告轮播开关。
+ *
+ * 实测更正（本机 r5f-dedi 1.0.13，2026-09-15）：`bridge_chat_announce` 是**cvar**，不是命令 ——
+ * `help bridge_chat_announce` 回 `"bridge_chat_announce" = "" ( def. "0" ) release - Broadcast
+ * the rotating server chat announcements.`；引擎脚本 `sv_chat_announcements.nut` 里
+ * `ChatAnnounce_Broadcast` / `ChatAnnounce_Loop` / `ChatAnnounce_OnClientConnected` 全都先查
+ * `GetConVarBool("bridge_chat_announce")`，为假就整段不发。
+ *
+ * 旧的 `announce` 把 cvar 当命令发（一个裸名字就是一个赋值）→ 把值写成空串，等于把公告**关掉**，
+ * 然后对外说"已广播"。本批改成真实的开关语义，并且写后读回确认（`help <cvar>` 会回当前值）。
+ */
+export type AnnounceAction = "status" | "on" | "off";
+
+export async function cmdAnnounce(
+  state: State,
+  action: AnnounceAction = "status",
+  opts: { json?: boolean } = {},
+): Promise<number> {
+  const runtime = state.runtime;
+  const running = Boolean(runtime?.ctlPort && runtime.ctlToken);
+  const setting = state.settings.announceRotate === "on" ? "开启" : "关闭（引擎默认）";
+
+  if (action === "on" || action === "off") {
+    if (!running) {
+      console.log(red("  没有正在运行的实例：轮播开关是运行期 cvar，需要托管控制台。"));
+      console.log(dim("  要长期开启：r5-server settings --announce-rotate on（下次启动生效）。"));
+      return 2;
+    }
+    const want = action === "on" ? "1" : "0";
+    let result: ConVarWrite;
+    try {
+      result = await setConVar(state, "bridge_chat_announce", want);
+    } catch (err) {
+      if (err instanceof NoControlChannelError) {
+        console.log(red(`  ${err.message}`));
+        return 2;
+      }
+      console.log(red(`  ${err instanceof Error ? err.message : String(err)}`));
+      return 1;
+    }
+    if (opts.json) {
+      console.log(
+        JSON.stringify(
+          { cvar: "bridge_chat_announce", want, before: result.before, after: result.after, ok: result.ok },
+          null,
+          2,
+        ),
+      );
+      return result.ok ? 0 : 1;
+    }
+    if (!result.ok) {
+      console.log(
+        red(`  没有改成功：引擎回报 = ${result.after === null ? "(读不到)" : `"${result.after}"`}，期望 "${want}"`),
+      );
+      console.log(dim("  引擎原文："));
+      result.sent.lines.forEach((line) => console.log(dim(`    ${line}`)));
+      return 1;
+    }
+    console.log(green(`  已${action === "on" ? "开启" : "关闭"}公告轮播（引擎回报 = "${result.after}"）`));
+    if (action === "on") {
+      console.log(dim("  轮播会按文案表里的 wait 秒数逐条发；玩家进入时还会发欢迎语（kind=welcome）。"));
+      console.log(dim("  文案改动需 changelevel 或重启后生效（引擎文件头自述）；效果要真人在场才看得到。"));
+    }
+    return 0;
   }
-  return code;
+
+  let live: ConVarRead | null = null;
+  let liveError = "";
+  if (running) {
+    try {
+      live = await readConVar(state, "bridge_chat_announce");
+    } catch (err) {
+      liveError = err instanceof Error ? err.message : String(err);
+    }
+  }
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          cvar: "bridge_chat_announce",
+          running,
+          live: live?.found ? live.value : null,
+          setting: state.settings.announceRotate,
+          error: liveError.length > 0 ? liveError : null,
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
+  }
+  header("公告轮播");
+  kv(
+    "引擎当前值",
+    !running
+      ? "实例未运行（读不到）"
+      : liveError
+        ? liveError
+        : live?.found
+          ? `引擎回报 = "${live.value}"`
+          : "引擎没回这个 cvar",
+  );
+  kv("开机设置", setting);
+  console.log("");
+  console.log(dim("  开启时引擎会：① 按 kind=rotate 的文案逐条轮播；② 玩家进入时发 kind=welcome 的欢迎语。"));
+  console.log(
+    dim("  关闭（引擎默认）时一条都不发。运行期开关：r5-server announce on|off；长期：settings --announce-rotate on"),
+  );
+  console.log(dim("  文案改动在 changelevel 或重启后生效（引擎文件头自述）；广播效果需真人在场确认。"));
+  return 0;
 }
 
 // -------------------------------------------------------------------- mode
@@ -1841,9 +2167,48 @@ export async function cmdModeSet(state: State, playlist: string, map?: string): 
     return 1;
   }
   if (!mode) console.log(yellow(`  提示：「${id}」不在本地模式目录里，仍按你给的值发送。`));
-  return sendWithReceipt(state, `bridge_setmode ${id} ${chosenMap}`, {
-    suffix: `切换后复查：r5-server status（模式 ${id}，地图 ${chosenMap}）`,
-  });
+  let receipt: Receipt;
+  try {
+    receipt = await consoleWithReceipt(state, `bridge_setmode ${id} ${chosenMap}`);
+  } catch (err) {
+    if (err instanceof NoControlChannelError) {
+      console.log(red(`  ${err.message}`));
+      return 2;
+    }
+    console.log(red(`  ${err instanceof Error ? err.message : String(err)}`));
+    return 1;
+  }
+  if (state.runtime) {
+    const live = parseLiveLevel(receipt.lines);
+    if (live) {
+      // 回执里带着引擎真正的切换结果 —— 存起来，`status` 就不用拿启动设置冒充"当前"了。
+      state.runtime.live = { ...live, at: new Date().toISOString() };
+      record(state, "mode set", `${live.playlist} ${live.map}`);
+      saveState(state);
+    }
+  }
+  console.log(RECEIPT_TONE[receipt.kind](receiptLabel(receipt)));
+  if (receipt.kind === "silent") for (const extra of receipt.lines) console.log(dim(`    ${extra}`));
+  if (receipt.kind === "success") {
+    const live = parseLiveLevel(receipt.lines) ?? { playlist: id, map: chosenMap };
+    console.log(dim(`  引擎已确认换图：模式 ${live.playlist} · 地图 ${live.map}（本次运行；改启动设置用 settings）`));
+  } else if (receipt.kind === "silent") {
+    console.log(dim("  引擎没有回确认行：换图是否成功要玩家端看实际地图，别按这里的话断言成功。"));
+  }
+  return receipt.kind === "success" || receipt.kind === "silent" ? 0 : 1;
+}
+
+/**
+ * `bridge_setmode` 成功时引擎会回 `Starting server with name: "x" map: "y" mode: "z"`
+ * （实测 1.0.13：`mode set fs_1v1 mp_rr_aqueduct` → 该行 + `CHostState::State_ChangeLevelMP`）。
+ */
+export function parseLiveLevel(lines: string[]): { playlist: string; map: string } | null {
+  for (const raw of lines) {
+    const line = normaliseLogLine(raw);
+    const match = /^Starting server with name: ".+" map: "(.+)" mode: "(.+)"/.exec(line);
+    if (match) return { map: match[1], playlist: match[2] };
+  }
+  return null;
 }
 
 // ------------------------------------------------------------------ health

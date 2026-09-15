@@ -361,10 +361,17 @@ export function routeKey(ui: UiState, ev: KeyEvent, ctx: RouteContext): RouteOut
     return confirmKey(ui, ev, ui.dialog);
   }
 
-  const quit = ev.input === "q" || (ev.ctrl && ev.input === "c");
-  if (quit) return { ui, quit: true };
+  // Ctrl+C is a control key, never a character: it quits from every state.
+  if (ev.ctrl && ev.input === "c") return { ui, quit: true };
 
-  if (ev.input === ":") return { ui: { ...ui, consoleOpen: true } };
+  // 可打印字符的全局快捷键只在「没人正在输入」时生效。控制台提示行与对话框各自整段
+  // 吃掉按键（见上），设置项在 input 态必须一样 —— 否则改服务器名时敲 `:` 会弹控制台、
+  // 敲 `q` 会直接退出面板。新增可打印的全局快捷键时，一律放进这道闸里。
+  const typing = ui.route === "settings" && ui.edit.mode === "input";
+  if (!typing) {
+    if (ev.input === "q") return { ui, quit: true };
+    if (ev.input === ":") return { ui: { ...ui, consoleOpen: true } };
+  }
 
   if (ui.route === "players") {
     const count = ctx.players.length;

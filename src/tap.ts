@@ -19,6 +19,7 @@ import { appendFileSync, existsSync, mkdirSync, openSync, readSync, statSync, cl
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, join } from "node:path";
 import { stripVTControlCharacters } from "node:util";
+import { type ModerationEntry, dueEntries, loadModeration, markUnbanned } from "./moderation";
 
 export const HOSTED_ENV = "R5F_HOSTED_CONSOLE";
 export const PIPE_ENV = "R5F_CONSOLE_PIPE";
@@ -64,6 +65,8 @@ export type LogDaemonOptions = {
   ctlPort?: number;
   /** shared secret the control client must send first */
   ctlToken?: string;
+  /** 工具根目录：到期临时封禁的解封要读写这里的 `moderation.json` */
+  root?: string;
 };
 
 const UTF8_STRICT = new TextDecoder("utf-8", { fatal: true });
@@ -193,8 +196,36 @@ export async function runLogDaemon(opts: LogDaemonOptions): Promise<number> {
   const started = Date.now();
   const idleDeadline = 10 * 60 * 1000;
 
+  /**
+   * 临时封禁到期：由守护（而不是某个已退出的 CLI）把 `unban "<id64>"` 写进引擎输入管道。
+   * 这是"封 30 分钟"里"到点解封"那一半 —— 不写这句，台账上的到期就是假的。
+   * 解封行同时记进日志分片，好让 `logs` / 面板按时间线看见它。
+   */
+  const sweepExpiredBans = (): void => {
+    if (!opts.root || !engineInput) return;
+    let due: ModerationEntry[];
+    try {
+      due = dueEntries(loadModeration(opts.root), Date.now());
+    } catch {
+      return;
+    }
+    for (const entry of due) {
+      try {
+        engineInput.write(`unban "${entry.id64}"\n`);
+      } catch {
+        continue;
+      }
+      markUnbanned(opts.root, entry.id, Date.now());
+      appendFileSync(
+        opts.logFile,
+        `[r5-server] 临时封禁到期（${entry.minutes} 分钟）：已发送 unban "${entry.id64}"${entry.name.length > 0 ? `（${entry.name}）` : ""}\n`,
+      );
+    }
+  };
+
   for (;;) {
     await Bun.sleep(2000);
+    sweepExpiredBans();
     if (enginePid === 0) {
       if (existsSync(opts.pidFile)) {
         const text = await Bun.file(opts.pidFile).text();

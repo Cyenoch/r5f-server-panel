@@ -11,6 +11,9 @@ export type AuthMode = 0 | 1 | 2;
 /** 1v1 对战统计是否外发到 R5F 统计服务（fs_stats_url）。 */
 export type StatsUpload = "default" | "off";
 
+/** 公告轮播开关（`bridge_chat_announce`，引擎默认关）。 */
+export type AnnounceRotate = "default" | "on";
+
 export type Settings = {
   port: number;
   map: string;
@@ -23,9 +26,19 @@ export type Settings = {
   quotaScript: number;
   /** 1v1/对战数据上报；"off" 会追加 +fs_stats_url ""（置空即关闭，引擎自述） */
   statsUpload: StatsUpload;
+  /** 公告轮播；"on" 会追加 +bridge_chat_announce 1（引擎默认 0 = 一条都不发） */
+  announceRotate: AnnounceRotate;
   /** 保留最近几次运行的日志分片（本机工具设置，不传给引擎） */
   logRetention: number;
   extra: string;
+};
+
+/** 运行期实际生效的模式与地图：`bridge_setmode` 的回执里带了这两项。 */
+export type LiveLevel = {
+  playlist: string;
+  map: string;
+  /** 记下回执的时刻（ISO） */
+  at: string;
 };
 
 export type Runtime = {
@@ -41,6 +54,8 @@ export type Runtime = {
   ctlPort?: number;
   /** shared secret for the control port */
   ctlToken?: string;
+  /** 运行中真正生效的模式与地图（来自最近的 bridge_setmode 回执，不是启动设置） */
+  live?: LiveLevel;
 };
 
 export type HistoryEntry = {
@@ -78,6 +93,7 @@ export const defaultSettings: Settings = {
   quotaString: 256,
   quotaScript: 128,
   statsUpload: "default",
+  announceRotate: "default",
   logRetention: 10,
   extra: "",
 };
@@ -107,6 +123,7 @@ function readSettings(raw: unknown): Settings {
     quotaString: readNumber(o.quotaString, defaultSettings.quotaString),
     quotaScript: readNumber(o.quotaScript, defaultSettings.quotaScript),
     statsUpload: o.statsUpload === "off" ? "off" : "default",
+    announceRotate: o.announceRotate === "on" ? "on" : "default",
     logRetention: clamp(Math.trunc(readNumber(o.logRetention, defaultSettings.logRetention)), 1, 1000),
     extra: readString(o.extra, ""),
   };
@@ -127,7 +144,17 @@ function readRuntime(raw: unknown): Runtime | null {
     logFile: typeof o.logFile === "string" && o.logFile.length > 0 ? o.logFile : undefined,
     ctlPort: readNumber(o.ctlPort, 0) > 0 ? readNumber(o.ctlPort, 0) : undefined,
     ctlToken: typeof o.ctlToken === "string" && o.ctlToken.length > 0 ? o.ctlToken : undefined,
+    live: readLive(o.live),
   };
+}
+
+function readLive(raw: unknown): LiveLevel | undefined {
+  if (typeof raw !== "object" || raw === null) return undefined;
+  const o = raw as Record<string, unknown>;
+  const playlist = readString(o.playlist, "");
+  const map = readString(o.map, "");
+  if (playlist.length === 0 && map.length === 0) return undefined;
+  return { playlist, map, at: readString(o.at, "") };
 }
 
 export function loadState(): State {

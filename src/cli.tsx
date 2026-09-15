@@ -29,6 +29,7 @@ import {
   cmdModeList,
   cmdModeSet,
   cmdModerate,
+  cmdMute,
   cmdPlayers,
   cmdSettings,
   cmdSetup,
@@ -278,6 +279,7 @@ function buildProgram(): Command {
     .option("--auth <n>")
     .option("--quota-string <n>", "每秒 string 命令上限")
     .option("--quota-script <n>", "每秒脚本命令上限")
+    .option("--announce-rotate <mode>", "公告轮播 on | default（引擎默认关）")
     .option("--extra <args>")
     .action(async (opts: Record<string, unknown>) => {
       process.exitCode = await cmdSettings(state, settingsFromOptions(opts));
@@ -349,10 +351,10 @@ function buildProgram(): Command {
 
   program
     .command("ban")
-    .description("封禁玩家（userid 或 id64；引擎无回执，结果无法确认）")
+    .description("封禁玩家（userid 或 id64）。带 --minutes/--reason 时本机记台账，到期由守护自动解封")
     .argument("<target>", "userid 或 id64")
-    .option("--minutes <n>", "【不支持】时长属 Spire 侧模型，见报错说明")
-    .option("--reason <text>", "【不支持】原因属 Spire 侧模型，见报错说明")
+    .option("--minutes <n>", "临时封禁时长（1–10080 分钟）；不写 = 永久")
+    .option("--reason <text>", "封禁原因（只记在本机，引擎不保存）")
     .action(async (target: string, opts: { minutes?: string; reason?: string }) => {
       process.exitCode = await cmdModerate(state, "ban", target, {
         minutes: numberOrUndefined(opts.minutes, "--minutes"),
@@ -361,8 +363,18 @@ function buildProgram(): Command {
     });
 
   program
+    .command("mute")
+    .description("禁言：引擎没有本地禁言命令，本命令只如实说明并读出引擎的通讯封禁开关")
+    .argument("[target]", "userid 或 id64（给了目标也只会拒绝）")
+    .option("--minutes <n>", "（不支持）")
+    .option("--reason <text>", "（不支持）")
+    .action(async (target: string | undefined) => {
+      process.exitCode = await cmdMute(state, target);
+    });
+
+  program
     .command("unban")
-    .description("解封（id64）")
+    .description("解封（id64）；同时把本机台账里对应记录标为已解除")
     .argument("<target>", "id64")
     .action(async (target: string) => {
       process.exitCode = await cmdModerate(state, "unban", target);
@@ -370,9 +382,9 @@ function buildProgram(): Command {
 
   program
     .command("banlist")
-    .description("本地 banlist.json（引擎无回执；--reload 让引擎重新加载名单）")
+    .description("本机封禁台账 + 引擎的 banlist.json（--reload 让引擎重新加载名单）")
     .option("--reload", "先发送 banlist_reload")
-    .option("--json", "输出 JSON（path / reload / entries）")
+    .option("--json", "输出 JSON（path / reload / entries / local）")
     .action(async (opts: { reload?: boolean; json?: boolean }) => {
       process.exitCode = await cmdBanlist(state, {
         reload: Boolean(opts.reload),
@@ -382,10 +394,16 @@ function buildProgram(): Command {
 
   program
     .command("announce")
-    .description("触发一次轮播公告广播（bridge_chat_announce，引擎无回执）")
+    .description("公告轮播开关：announce [status|on|off]（写入后读回确认，不再假装已广播）")
+    .argument("[action]", "status | on | off", "status")
     .option("--json", "输出 JSON")
-    .action(async (opts: { json?: boolean }) => {
-      process.exitCode = await cmdAnnounce(state, { json: Boolean(opts.json) });
+    .action(async (action: string, opts: { json?: boolean }) => {
+      if (action !== "status" && action !== "on" && action !== "off") {
+        console.log(red(`  announce 只认 status / on / off，收到「${action}」`));
+        process.exitCode = 1;
+        return;
+      }
+      process.exitCode = await cmdAnnounce(state, action, { json: Boolean(opts.json) });
     });
 
   program
@@ -480,6 +498,7 @@ function buildProgram(): Command {
     .requiredOption("--pid-file <path>")
     .option("--ctl-port <n>", "回环控制端口（0 = 由系统分配）")
     .option("--ctl-token <token>", "控制通道口令")
+    .option("--root <dir>", "工具根目录（到期临时封禁在这里的 moderation.json）")
     .action(
       async (opts: {
         outPipe: string;
@@ -488,6 +507,7 @@ function buildProgram(): Command {
         pidFile: string;
         ctlPort?: string;
         ctlToken?: string;
+        root?: string;
       }) => {
         process.exitCode = await runLogDaemon({
           outPipe: opts.outPipe,
@@ -496,6 +516,7 @@ function buildProgram(): Command {
           pidFile: opts.pidFile,
           ctlPort: Number.parseInt(opts.ctlPort ?? "0", 10) || 0,
           ctlToken: opts.ctlToken ?? "",
+          root: opts.root,
         });
       },
     );
@@ -548,6 +569,7 @@ function settingsFromOptions(opts: Record<string, unknown>): SettingChange[] {
     { id: "authMode", value: stringOrUndefined(opts.auth) },
     { id: "quotaString", value: stringOrUndefined(opts.quotaString) },
     { id: "quotaScript", value: stringOrUndefined(opts.quotaScript) },
+    { id: "announceRotate", value: stringOrUndefined(opts.announceRotate) },
     { id: "extra", value: stringOrUndefined(opts.extra) },
   ];
   return raw
