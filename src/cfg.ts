@@ -34,6 +34,7 @@ export const CFG_FILES = [
 /** Launch setting -> the cvar(s) the engine also understands. */
 export const FIELD_CVARS: Partial<Record<FieldId, string[]>> = {
   hostname: ["hostname"],
+  hostip: ["hostip"],
   visibility: ["spire_host_visibility"],
   authMode: ["sv_onlineAuthMode"],
   password: ["sv_password"],

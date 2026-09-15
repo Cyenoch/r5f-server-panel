@@ -21,8 +21,8 @@ import { connect as netConnect } from "node:net";
 import { join } from "node:path";
 import stringWidth from "string-width";
 import { type Announcement, collectAnnouncements, renderAnnouncements, validateAnnouncement } from "./announcements";
-import { type ModeFamily, collectModes, mapsForPlaylist } from "./catalog";
-import { syncLaunchSettings } from "./cfg";
+import { type ModeEntry, type ModeFamily, collectModes, mapsForPlaylist } from "./catalog";
+import { type CfgSync, syncLaunchSettings } from "./cfg";
 import { type Section, type Tone, collectDetail, collectDoctor, collectHealth } from "./inspect";
 import {
   type ModerationEntry,
@@ -41,6 +41,7 @@ import {
   loadState,
   record,
   saveState,
+  syncActiveProfile,
   type AuthMode,
   type Settings,
   type State,
@@ -171,6 +172,8 @@ export type StartOptions = {
   force?: boolean;
   /** false = plain console window (no pipe tap, no log file) */
   hosted?: boolean;
+  /** 日志守护该以什么 argv 重新进入 CLI；桌面端的宿主用 `R5_SERVER_DAEMON` 传进来。 */
+  daemonCommand?: string[];
 };
 
 /** Wait for the log daemon's `READY <ctlPort>` line on its stdout pipe. */
@@ -240,6 +243,8 @@ function buildArgs(s: Settings): string[] {
     String(s.quotaScript),
   ];
   if (s.visibility === 0) args.push("-offline", "+sv_onlineAuthEnable", "0");
+  // 上报/探测用的公网地址：NAT 主机上引擎自测拿不到，不传就永远上不了架。
+  if (s.hostip.length > 0) args.push("+hostip", s.hostip);
   if (s.password.length > 0) args.push("+sv_password", s.password);
   if (s.playlist.length > 0) args.push("+launchplaylist", s.playlist);
   if (s.map.length > 0) args.push("+map", s.map);
@@ -299,13 +304,13 @@ function logShardName(version: string, port: number, at: Date): string {
 }
 
 /** runid = 文件名末尾的 `YYYYMMDD-HHMMSS`（列表显示它，`logs --run` 也接受它）。 */
-function shardRunId(name: string): string {
+export function shardRunId(name: string): string {
   const match = /(\d{8}-\d{6})\.log$/.exec(name);
   return match ? match[1] : name.replace(/\.log$/, "");
 }
 
 /** 全部分片（最新在前，按修改时间；含旧命名的遗留文件）。 */
-function listLogShards(currentPath: string | undefined): LogShard[] {
+export function listLogShards(currentPath: string | undefined): LogShard[] {
   const dir = join(ROOT, "logs");
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
@@ -334,56 +339,61 @@ function pruneLogShards(keep: number, keepPath: string): string[] {
   return failed;
 }
 
-export async function cmdStart(state: State, opts: StartOptions): Promise<number> {
+export type StartOutcome =
+  | { ok: false; error: string; hint?: string }
+  | {
+      ok: true;
+      version: string;
+      versionPath: string;
+      pid: number;
+      port: number;
+      workingSetMB: number;
+      privateMB: number;
+      endpoints: string[];
+      title: string;
+      settings: Settings;
+      logFile?: string;
+      hosted: boolean;
+      bound: boolean;
+      /** 启动前为「面板值优先于 cfg」重写过的 cvar 行 */
+      synced: CfgSync[];
+      /** 不致命但要说出来的事（守护没起来、旧分片删不掉…） */
+      warnings: string[];
+    };
+
+/**
+ * 启动当前版本并返回结果；`report` 只收进度行（CLI 用来打印，面板传空）。
+ * 前台模式（`foreground`）是 CLI 专属：它接管终端、会阻塞到进程退出。
+ */
+export async function startInstance(
+  state: State,
+  opts: StartOptions,
+  report: (line: string) => void = () => {},
+): Promise<StartOutcome> {
   const version = await ensureVersion(state, true);
-  if (!version) return 1;
+  if (!version) return { ok: false, error: "没有选定版本目录。" };
 
   const settings = effectiveSettings(state, opts);
   const alive = runningProcessesFor(version.path);
   if (alive.length > 0 && !opts.force) {
-    console.log(yellow(`该版本已在运行（pid ${alive.map((p) => p.pid).join(", ")}）。`));
-    console.log(dim("  如需重启：r5-server restart   /   强制再开一个：start --force"));
-    return 1;
+    return {
+      ok: false,
+      error: `该版本已在运行（pid ${alive.map((p) => p.pid).join(", ")}）。`,
+      hint: "如需重启：r5-server restart   /   强制再开一个：start --force",
+    };
   }
-  if (win.portInUse(settings.port)) {
-    console.log(yellow(`UDP ${settings.port} 已被占用（可能是别的实例）。`));
-    if (!opts.force) {
-      console.log(dim("  换端口：start --port 37016   或强制：--force"));
-      return 1;
-    }
+  if (win.portInUse(settings.port) && !opts.force) {
+    return {
+      ok: false,
+      error: `UDP ${settings.port} 已被占用（可能是别的实例）。`,
+      hint: "换端口：start --port 37016   或强制：--force",
+    };
   }
 
   const exePath = join(version.path, EXE);
   const args = buildArgs(settings);
-  header(`启动 ${version.name}`);
-  kv("端口", `UDP ${settings.port}`);
-  kv("地图", settings.map || "(未指定)");
-  kv("模式", settings.playlist || "(启动后由玩家选择)");
-  kv("可见性", `${settings.visibility}  (0=离线 1=隐藏 2=公开)`);
-  kv("认证", `sv_onlineAuthMode ${settings.authMode}`);
-  kv("名称", settings.hostname);
-
   const env = { ...process.env, VPROJECT: "1", FROM_R5F_LAUNCHER: "1" } as Record<string, string>;
-
-  if (opts.foreground) {
-    console.log(dim("\n前台模式，Ctrl+C 结束；退出后按需重启...\n"));
-    for (;;) {
-      const child = Bun.spawn({
-        cmd: [exePath, ...args],
-        cwd: version.path,
-        env,
-        stdin: "inherit",
-        stdout: "inherit",
-        stderr: "inherit",
-      });
-      const code = await child.exited;
-      console.log(yellow(`r5apex_ds 退出，退出码 ${code}`));
-      if (opts.noRestart) break;
-      console.log(dim("10 秒后重启..."));
-      await Bun.sleep(10_000);
-    }
-    return 0;
-  }
+  const warnings: string[] = [];
 
   let logdPid: number | undefined;
   let logFile: string | undefined;
@@ -397,7 +407,7 @@ export async function cmdStart(state: State, opts: StartOptions): Promise<number
     const pidFile = join(logDir(ROOT), `.tap-${names.id}.pid`);
     const ctlToken = randomUUID().replace(/-/g, "");
     const daemon = Bun.spawn({
-      cmd: selfCommand([
+      cmd: (opts.daemonCommand ?? selfCommand([])).concat([
         "__logd",
         "--out-pipe",
         names.outPipe,
@@ -428,13 +438,12 @@ export async function cmdStart(state: State, opts: StartOptions): Promise<number
       logFile = candidateLog;
       ctlTokenValue = ctlToken;
       ctlPortValue = ctlPort;
-      console.log(dim("已启用托管控制台（日志会写入文件并可用 r5-server logs -f 实时查看）"));
+      report("已启用托管控制台（日志会写入文件并可用 r5-server logs -f 实时查看）");
       // 保留最近 N 次运行的分片（`logRetention` 是本机工具设置，不传给引擎）。
       const failed = pruneLogShards(Math.max(1, state.settings.logRetention ?? 10), candidateLog);
-      if (failed.length > 0) console.log(yellow(`  旧日志分片删除失败（不影响启动）：${failed.join(", ")}`));
-      kv("本次日志", candidateLog);
+      if (failed.length > 0) warnings.push(`旧日志分片删除失败（不影响启动）：${failed.join(", ")}`);
     } else {
-      console.log(yellow("日志守护未能就绪，本次退回普通控制台模式（日志只在引擎窗口里）。"));
+      warnings.push("日志守护未能就绪，本次退回普通控制台模式（日志只在引擎窗口里）。");
       try {
         daemon.kill();
       } catch {
@@ -446,11 +455,7 @@ export async function cmdStart(state: State, opts: StartOptions): Promise<number
 
   // autoexec_server.cfg runs after the launch arguments: rewrite the cvars it
   // shares with the panel so the panel's values are the effective ones.
-  for (const change of syncLaunchSettings(version.path, settings)) {
-    console.log(
-      dim(`  已同步 ${change.file}: ${change.cvar} ${change.from} → "${change.to}"（否则 cfg 会覆盖面板设置）`),
-    );
-  }
+  const synced = syncLaunchSettings(version.path, settings);
 
   const before = new Set(win.findDediProcesses().map((p) => p.pid));
   const child = Bun.spawn({
@@ -464,12 +469,14 @@ export async function cmdStart(state: State, opts: StartOptions): Promise<number
   });
   child.unref();
 
-  console.log(dim("\n等待实例就绪（加载地图通常 10-30 秒）..."));
+  report("等待实例就绪（加载地图通常 10-30 秒）...");
   const { proc, bound } = await waitForStarted(version.path, settings.port, before);
   if (!proc) {
-    console.log(red("30 秒内没有出现服务端进程。"));
-    console.log(dim("  排查：三件套是否齐全（r5-server doctor）、端口是否被占、杀软是否拦截 loader.dll。"));
-    return 1;
+    return {
+      ok: false,
+      error: "30 秒内没有出现服务端进程。",
+      hint: "排查：三件套是否齐全（r5-server doctor）、端口是否被占、杀软是否拦截 loader.dll。",
+    };
   }
   state.runtime = {
     pid: proc.pid,
@@ -489,23 +496,86 @@ export async function cmdStart(state: State, opts: StartOptions): Promise<number
     await Bun.write(tapPidFile, String(proc.pid));
   }
 
-  console.log(green(`\n已启动：pid ${proc.pid}`));
-  kv("内存", `${proc.workingSetMB} MB 工作集 / ${proc.privateMB} MB 私有提交`);
-  kv("监听 UDP", win.udpEndpoints(proc.pid).join(", "));
-  if (proc.title) kv("窗口标题", proc.title);
-  if (logFile) {
-    kv("日志", `${logFile}   ${dim("r5-server logs -f")}`);
-  } else {
-    console.log(dim("  本次未启用托管控制台：日志只在引擎自己的窗口标题/窗口内容里。"));
+  return {
+    ok: true,
+    version: version.name,
+    versionPath: version.path,
+    pid: proc.pid,
+    port: settings.port,
+    workingSetMB: proc.workingSetMB,
+    privateMB: proc.privateMB,
+    endpoints: win.udpEndpoints(proc.pid),
+    title: proc.title,
+    settings,
+    logFile,
+    hosted: Boolean(logFile),
+    bound,
+    synced,
+    warnings,
+  };
+}
+
+/** 前台模式（CLI 专属）：接管终端、Ctrl+C 结束，可选退出后自动重启。 */
+async function runForeground(state: State, opts: StartOptions): Promise<number> {
+  const version = await ensureVersion(state, true);
+  if (!version) return 1;
+  const settings = effectiveSettings(state, opts);
+  const env = { ...process.env, VPROJECT: "1", FROM_R5F_LAUNCHER: "1" } as Record<string, string>;
+  console.log(dim("前台模式，Ctrl+C 结束；退出后按需重启...\n"));
+  for (;;) {
+    const child = Bun.spawn({
+      cmd: [join(version.path, EXE), ...buildArgs(settings)],
+      cwd: version.path,
+      env,
+      stdin: "inherit",
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    const code = await child.exited;
+    console.log(yellow(`r5apex_ds 退出，退出码 ${code}`));
+    if (opts.noRestart) break;
+    console.log(dim("10 秒后重启..."));
+    await Bun.sleep(10_000);
   }
-  if (!bound) {
-    console.log(yellow(`  注意：进程在跑但 30 秒内没看到 UDP ${settings.port} 绑定，稍后用 status 复查。`));
-  }
-  console.log(dim(`  玩家加入：R5F launcher -> connect <公网IP>:${settings.port}`));
   return 0;
 }
 
-export function cmdStop(state: State, opts: { all?: boolean } = {}): number {
+export async function cmdStart(state: State, opts: StartOptions): Promise<number> {
+  if (opts.foreground) return runForeground(state, opts);
+  const result = await startInstance(state, opts, (line) => console.log(dim(line)));
+  if (!result.ok) {
+    console.log(red(result.error));
+    if (result.hint) console.log(dim(`  ${result.hint}`));
+    return 1;
+  }
+
+  header(`启动 ${result.version}`);
+  kv("端口", `UDP ${result.port}`);
+  kv("地图", result.settings.map || "(未指定)");
+  kv("模式", result.settings.playlist || "(启动后由玩家选择)");
+  kv("可见性", `${result.settings.visibility}  (0=离线 1=隐藏 2=公开)`);
+  kv("认证", `sv_onlineAuthMode ${result.settings.authMode}`);
+  kv("名称", result.settings.hostname);
+  for (const warning of result.warnings) console.log(yellow(`  ${warning}`));
+  for (const change of result.synced) {
+    console.log(
+      dim(`  已同步 ${change.file}: ${change.cvar} ${change.from} → "${change.to}"（否则 cfg 会覆盖面板设置）`),
+    );
+  }
+  if (result.logFile) kv("本次日志", result.logFile);
+  console.log(green(`\n已启动：pid ${result.pid}`));
+  kv("内存", `${result.workingSetMB} MB 工作集 / ${result.privateMB} MB 私有提交`);
+  kv("监听 UDP", result.endpoints.join(", "));
+  if (result.title) kv("窗口标题", result.title);
+  if (!result.bound) {
+    console.log(yellow(`  注意：进程在跑但 30 秒内没看到 UDP ${result.port} 绑定，稍后用 status 复查。`));
+  }
+  console.log(dim(`  玩家加入：R5F launcher -> connect <公网IP>:${result.port}`));
+  return 0;
+}
+
+/** 停掉实例：进程树 + 日志守护；`all` 连本目录下其它实例一起停。 */
+export function stopInstance(state: State, opts: { all?: boolean } = {}): { killed: number } {
   let killed = 0;
   const runtime = state.runtime;
   if (runtime?.pid) {
@@ -530,6 +600,11 @@ export function cmdStop(state: State, opts: { all?: boolean } = {}): number {
   state.runtime = null;
   record(state, "stop", `killed=${killed}`);
   saveState(state);
+  return { killed };
+}
+
+export function cmdStop(state: State, opts: { all?: boolean } = {}): number {
+  const { killed } = stopInstance(state, opts);
   console.log(killed > 0 ? green(`已停止 ${killed} 个进程。`) : dim("没有正在运行的实例。"));
   return 0;
 }
@@ -833,11 +908,13 @@ function printSettingsTable(state: State): void {
  * Persist validated changes. Every surface (CLI flag, settings page) funnels
  * through the field table, so a value accepted in one place is accepted in all.
  */
-export async function cmdSettings(state: State, changes: SettingChange[]): Promise<number> {
-  if (changes.length === 0) {
-    printSettingsTable(state);
-    return 0;
-  }
+export type SettingsOutcome = { applied: string[]; failed: string[] };
+
+/**
+ * 应用一批设置改动（唯一入口：CLI、面板都走这里）。返回逐条结果，不打印。
+ * 改动会同步写回正在生效的档案，档案与生效值不会漂移。
+ */
+export function saveSettings(state: State, changes: SettingChange[]): SettingsOutcome {
   const applied: string[] = [];
   const failed: string[] = [];
   for (const change of changes) {
@@ -851,9 +928,19 @@ export async function cmdSettings(state: State, changes: SettingChange[]): Promi
   }
   if (applied.length > 0) {
     record(state, "settings", applied.join("; "));
+    syncActiveProfile(state);
     saveState(state);
-    applied.forEach((line) => console.log(green(`  已保存  ${line}`)));
   }
+  return { applied, failed };
+}
+
+export async function cmdSettings(state: State, changes: SettingChange[]): Promise<number> {
+  if (changes.length === 0) {
+    printSettingsTable(state);
+    return 0;
+  }
+  const { applied, failed } = saveSettings(state, changes);
+  applied.forEach((line) => console.log(green(`  已保存  ${line}`)));
   failed.forEach((line) => console.log(red(`  未保存  ${line}`)));
   if (failed.length > 0) {
     console.log(dim("\n  取值说明见：r5-server settings（不带参数）"));
@@ -873,6 +960,7 @@ export function applySettingInPlace(id: FieldId, raw: string): { ok: boolean; er
   const parsed = applyFieldValue(state.settings, id, raw);
   if (!parsed.ok) return { ok: false, error: parsed.error, text: "" };
   record(state, "settings", `${field.label}=${field.display(state.settings)}`);
+  syncActiveProfile(state);
   saveState(state);
   return { ok: true, text: `${field.label} = ${field.display(state.settings)}` };
 }
@@ -1182,11 +1270,14 @@ function controlSend(port: number, token: string, lines: string[], timeoutMs = 4
 
 /** 实例不是用托管控制台启动的：没有 `ctlPort`/令牌（CLI 映射到退出码 2）。 */
 export class NoControlChannelError extends Error {
-  constructor(message = "当前实例没有控制通道（需要托管控制台启动）。") {
+  constructor(message = NO_CONTROL_MESSAGE) {
     super(message);
     this.name = "NoControlChannelError";
   }
 }
+
+/** 没有托管控制台时的统一文案（CLI、面板共用）。 */
+export const NO_CONTROL_MESSAGE = "这台服务器没有控制通道（上次启动时没开），重启服务器后就能用。";
 
 /** 发送前的水位线：文件不存在返回 0。 */
 export async function logWatermark(path: string): Promise<number> {
@@ -1490,39 +1581,59 @@ function stripName(name: string): string {
   return name.replace(/^"+|"+$/g, "");
 }
 
+export type ModerateOutcome =
+  | { ok: false; error: string; hint?: string; exitCode: number }
+  | {
+      ok: true;
+      action: "kick" | "ban" | "unban";
+      receipt: Receipt;
+      label: string;
+      /** 写进本机台账的封禁记录（只有 ban 有） */
+      entry?: ModerationEntry;
+      /** 解封时被标为「已解除」的台账条数 */
+      released?: number;
+    };
+
 /** 带记录的封禁：先发引擎命令，再记本地台账（见 `moderation.ts` 的说明）。 */
-async function banWithRecord(state: State, target: string, opts: ModerateOptions): Promise<number> {
+async function banWithRecord(
+  state: State,
+  target: string,
+  opts: ModerateOptions,
+): Promise<ModerateOutcome | "no-control"> {
   const minutes = opts.minutes ?? 0;
   const reason = (opts.reason ?? "").trim();
   if (!Number.isInteger(minutes) || minutes < 0) {
-    console.log(red("  --minutes 需要 ≥ 0 的整数（0 或不写 = 永久）。"));
-    return 1;
+    return { ok: false, error: "--minutes 需要 ≥ 0 的整数（0 或不写 = 永久）。", exitCode: 1 };
   }
   if (minutes > MAX_TEMP_BAN_MINUTES) {
-    console.log(red(`  --minutes 最大 ${MAX_TEMP_BAN_MINUTES}（7 天）。更久请用不带 --minutes 的永久封禁。`));
-    return 1;
+    return {
+      ok: false,
+      error: `--minutes 最大 ${MAX_TEMP_BAN_MINUTES}（7 天）。更久请用不带 --minutes 的永久封禁。`,
+      exitCode: 1,
+    };
   }
   const resolved = await resolveTarget(state, target);
   if (!resolved.ok) {
-    console.log(red(`  ${resolved.error}`));
-    console.log(dim("  没有向引擎发送任何封禁指令（只读查了在线名单）。查名单：r5-server players"));
-    return resolved.error.includes("控制通道") || resolved.error.includes("没有正在运行") ? 2 : 1;
+    return {
+      ok: false,
+      error: resolved.error,
+      hint: "没有向引擎发送任何封禁指令（只读查了在线名单）。查名单：r5-server players",
+      exitCode: resolved.error.includes("控制通道") || resolved.error.includes("没有正在运行") ? 2 : 1,
+    };
   }
   let receipt: Receipt;
   try {
     receipt = await consoleWithReceipt(state, `ban "${target.trim()}"`);
   } catch (err) {
-    if (err instanceof NoControlChannelError) {
-      console.log(red(`  ${err.message}`));
-      return 2;
-    }
-    console.log(red(`  ${err instanceof Error ? err.message : String(err)}`));
-    return 1;
+    if (err instanceof NoControlChannelError) return "no-control";
+    return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 };
   }
   if (receipt.kind === "unknown" || receipt.kind === "usage") {
-    console.log(RECEIPT_TONE[receipt.kind](receiptLabel(receipt)));
-    console.log(dim("  引擎拒绝/不认这条命令 —— 没有写本地记录。"));
-    return 1;
+    return {
+      ok: false,
+      error: `${receiptLabel(receipt)} —— 引擎拒绝/不认这条命令，没有写本地记录。`,
+      exitCode: 1,
+    };
   }
   const now = Date.now();
   const entry: ModerationEntry = {
@@ -1537,35 +1648,39 @@ async function banWithRecord(state: State, target: string, opts: ModerateOptions
     state: "pending",
   };
   addRecord(ROOT, entry);
-  if (opts.json) {
-    console.log(
-      JSON.stringify(
-        {
-          action: "ban",
-          target: entry.target,
-          id64: entry.id64,
-          name: entry.name,
-          minutes,
-          reason,
-          expiresAt: entry.expiresAt > 0 ? new Date(entry.expiresAt).toISOString() : null,
-          receipt: { kind: receipt.kind, detail: receipt.detail },
-        },
-        null,
-        2,
-      ),
-    );
-    return 0;
+  return { ok: true, action: "ban", receipt, label: receiptLabel(receipt), entry };
+}
+
+/**
+ * 踢 / 封 / 解封的结构化版本：拿回执与台账结果，不打印。
+ *
+ * 实测（本机 r5f-dedi 1.0.13 托管实例）：`kick "<userid>"` 对机器人静默且不生效，
+ * 而 `kick "<玩家名>"` 回 `Kicked '…' from server` —— "静默"就如实说静默；
+ * `botsClear` 里补了按名字重试的回退。
+ */
+export async function moderate(
+  state: State,
+  action: "kick" | "ban" | "unban",
+  target: string,
+  opts: ModerateOptions = {},
+): Promise<ModerateOutcome | "no-control"> {
+  const trimmed = target.trim();
+  if (trimmed.length === 0) {
+    return { ok: false, error: `用法：r5-server ${action} <userid|id64>`, exitCode: 1 };
   }
-  console.log(RECEIPT_TONE[receipt.kind](receiptLabel(receipt)));
-  console.log(green(`  已记入本机台账：${entry.name || entry.id64}（id64 ${entry.id64}）`));
-  if (minutes > 0) {
-    console.log(dim(`  到期自动解封：${describeExpiry(entry, now)}`));
-    console.log(dim("  解封由日志守护在到期时发 `unban` —— 守护随实例存活；实例停着时不会执行。"));
-  } else {
-    console.log(dim("  永久封禁（无到期）。原因只记在本机，引擎不保存。"));
+  if (action === "ban" && (opts.minutes !== undefined || opts.reason !== undefined)) {
+    return banWithRecord(state, trimmed, opts);
   }
-  console.log(dim("  注意：引擎对 `ban` 不回话，所以这里只能说“命令已发出”，封没封上要玩家端确认。"));
-  return 0;
+  const line = action === "unban" ? `unban "${trimmed}"` : `${action} "${trimmed}"`;
+  let receipt: Receipt;
+  try {
+    receipt = await consoleWithReceipt(state, line);
+  } catch (err) {
+    if (err instanceof NoControlChannelError) return "no-control";
+    return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 };
+  }
+  const released = action === "unban" ? markUnbannedByTarget(ROOT, trimmed, Date.now()) : 0;
+  return { ok: true, action, receipt, label: receiptLabel(receipt), released };
 }
 
 /**
@@ -1585,21 +1700,51 @@ export async function cmdModerate(
   target: string,
   opts: ModerateOptions = {},
 ): Promise<number> {
-  const trimmed = target.trim();
-  if (trimmed.length === 0) {
-    console.log(red(`用法：r5-server ${action} <userid|id64>`));
-    return 1;
+  const result = await moderate(state, action, target, opts);
+  if (result === "no-control") {
+    console.log(red(`  ${NO_CONTROL_MESSAGE}`));
+    return 2;
   }
-  if (action === "ban" && (opts.minutes !== undefined || opts.reason !== undefined)) {
-    return banWithRecord(state, trimmed, opts);
+  if (!result.ok) {
+    console.log(red(`  ${result.error}`));
+    if (result.hint) console.log(dim(`  ${result.hint}`));
+    return result.exitCode;
   }
-  const line = action === "unban" ? `unban "${trimmed}"` : `${action} "${trimmed}"`;
-  const code = await cmdConsole(state, [line], { json: opts.json });
-  if (action === "unban" && code === 0) {
-    const marked = markUnbannedByTarget(ROOT, trimmed, Date.now());
-    if (marked > 0 && !opts.json) console.log(dim(`  已把本机台账里 ${marked} 条对应记录标为「已解除」。`));
+  if (opts.json) {
+    console.log(
+      JSON.stringify(
+        {
+          action: result.action,
+          target: target.trim(),
+          id64: result.entry?.id64 ?? null,
+          name: result.entry?.name ?? null,
+          minutes: result.entry?.minutes ?? null,
+          reason: result.entry?.reason ?? null,
+          expiresAt: result.entry && result.entry.expiresAt > 0 ? new Date(result.entry.expiresAt).toISOString() : null,
+          receipt: { kind: result.receipt.kind, detail: result.receipt.detail },
+        },
+        null,
+        2,
+      ),
+    );
+    return 0;
   }
-  return code;
+  console.log(RECEIPT_TONE[result.receipt.kind](result.label));
+  if (result.action === "ban" && result.entry) {
+    const entry = result.entry;
+    console.log(green(`  已记入本机台账：${entry.name || entry.id64}（id64 ${entry.id64}）`));
+    if (entry.minutes > 0) {
+      console.log(dim(`  到期自动解封：${describeExpiry(entry, Date.now())}`));
+      console.log(dim("  解封由日志守护在到期时发 `unban` —— 守护随实例存活；实例停着时不会执行。"));
+    } else {
+      console.log(dim("  永久封禁（无到期）。原因只记在本机，引擎不保存。"));
+    }
+    console.log(dim("  注意：引擎对 `ban` 不回话，所以这里只能说“命令已发出”，封没封上要玩家端确认。"));
+  }
+  if (result.action === "unban" && (result.released ?? 0) > 0) {
+    console.log(dim(`  已把本机台账里 ${result.released} 条对应记录标为「已解除」。`));
+  }
+  return 0;
 }
 
 /**
@@ -1674,63 +1819,103 @@ export async function cmdBotsList(state: State, opts: { json?: boolean } = {}): 
 
 export type BotAddOptions = { count?: number; name?: string; team?: 0 | 1 | 2 };
 
-/** 造机器人：有 `--name` 走 `sv_addbot <name> <team>`，否则 `spawnbots <count>`。 */
-export async function cmdBotsAdd(state: State, opts: BotAddOptions = {}): Promise<number> {
+export type BotsAddOutcome =
+  | { ok: false; error: string; hint?: string; exitCode: number }
+  | { ok: true; line: string; receipt: Receipt; label: string };
+
+/** 造机器人：有 `name` 走 `sv_addbot <name> <team>`，否则 `spawnbots <count>`。 */
+export async function botsAdd(state: State, opts: BotAddOptions = {}): Promise<BotsAddOutcome | "no-control"> {
   const name = (opts.name ?? "").trim();
   const count = opts.count ?? 1;
   const team = opts.team ?? 0;
   let line: string;
   if (name.length > 0) {
     if (count !== 1) {
-      console.log(red("  --name 与 --count 不能一起用：sv_addbot 一次只加一个具名机器人。"));
-      console.log(dim("  要一批同款机器人：r5-server bots add --count 3（走 spawnbots）"));
-      return 1;
+      return {
+        ok: false,
+        error: "--name 与 --count 不能一起用：sv_addbot 一次只加一个具名机器人。",
+        hint: "要一批同款机器人：r5-server bots add --count 3（走 spawnbots）",
+        exitCode: 1,
+      };
     }
     if (/\s/.test(name)) {
-      console.log(red("  名字不能包含空格（引擎用法字符串：name(string) teamid(int)，按空格分词）。"));
-      return 1;
+      return {
+        ok: false,
+        error: "名字不能包含空格（引擎用法字符串：name(string) teamid(int)，按空格分词）。",
+        exitCode: 1,
+      };
     }
     line = `sv_addbot ${name} ${team}`;
   } else {
     // 实测 `spawnbots 0` 生成了 1 个机器人 → 0 的语义不明确，拒绝而不是猜。
     if (!Number.isInteger(count) || count < 1) {
-      console.log(red("  --count 需要 ≥ 1 的整数（实测 spawnbots 0 会生成 1 个机器人，语义未证实）。"));
-      return 1;
+      return {
+        ok: false,
+        error: "--count 需要 ≥ 1 的整数（实测 spawnbots 0 会生成 1 个机器人，语义未证实）。",
+        exitCode: 1,
+      };
     }
     line = `spawnbots ${count}`;
   }
-  const code = await sendWithReceipt(state, line);
-  if (code === 0) console.log(dim("  新机器人会出现在：r5-server bots list"));
-  return code;
+  try {
+    const receipt = await consoleWithReceipt(state, line);
+    return { ok: true, line, receipt, label: receiptLabel(receipt) };
+  } catch (err) {
+    if (err instanceof NoControlChannelError) return "no-control";
+    return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 };
+  }
 }
 
-/** 清空机器人：`kick` 逐个来（先 userid 形式，静默则按名字重试一次），最多 2 轮 × 32 个。 */
-export async function cmdBotsClear(state: State): Promise<number> {
-  const first = await fetchBots(state);
-  if (first.error) {
-    console.log(red(`  ${first.error}`));
-    return 1;
+export async function cmdBotsAdd(state: State, opts: BotAddOptions = {}): Promise<number> {
+  const result = await botsAdd(state, opts);
+  if (result === "no-control") {
+    console.log(red(`  ${NO_CONTROL_MESSAGE}`));
+    return 2;
   }
-  header("清理机器人");
+  if (!result.ok) {
+    console.log(red(`  ${result.error}`));
+    if (result.hint) console.log(dim(`  ${result.hint}`));
+    return result.exitCode;
+  }
+  console.log(RECEIPT_TONE[result.receipt.kind](result.label));
+  if (result.receipt.kind === "unknown" || result.receipt.kind === "usage") return 1;
+  console.log(dim("  新机器人会出现在：r5-server bots list"));
+  return 0;
+}
+
+export type BotsClearOutcome =
+  | { ok: false; error: string; exitCode: number }
+  | {
+      ok: true;
+      /** 开始时看到的机器人数 */
+      before: number;
+      /** 清理后仍在的数量 */
+      remaining: number;
+      /** 引擎明确回 success 的次数 */
+      confirmed: number;
+      /** 被引擎拒绝的次数 */
+      refused: number;
+    };
+
+/** 清空机器人：`kick` 逐个来（先 userid 形式，静默则按名字重试），最多 2 轮 × 32 个。 */
+export async function botsClear(state: State): Promise<BotsClearOutcome | "no-control"> {
+  const first = await fetchBots(state);
+  if (first.error) return { ok: false, error: first.error, exitCode: 1 };
   if (first.bots.length === 0) {
-    console.log(green("  当前没有机器人，无需清理。"));
-    return 0;
+    return { ok: true, before: 0, remaining: 0, confirmed: 0, refused: 0 };
   }
   let confirmed = 0;
   let refused = 0;
   for (let round = 0; round < 2; round += 1) {
     const { bots, error } = await fetchBots(state);
-    if (error) {
-      console.log(red(`  ${error}`));
-      return 1;
-    }
+    if (error) return { ok: false, error, exitCode: 1 };
     if (bots.length === 0) break;
     for (const bot of bots.slice(0, 32)) {
       // 实测（本机 r5f-dedi 1.0.13 托管实例，2026-09-14）：`kick "<userid>"` 对机器人
       // 静默且不生效（机器人仍在列表里），`kick "<name>"` 才回 `Kicked '…' from server`。
       // ticket 01 的实测结论相反 —— 所以两种形式都发：先 ticket 的 userid 形式，
       // 没有成功回执再用名字；只有拿到 success 才算踢掉，静默永远不当成功。
-      const botName = bot.name.replace(/^"+|"+$/g, "");
+      const botName = stripName(bot.name);
       const tries = [`kick "${bot.userid}"`];
       if (botName.length > 0) tries.push(`kick "${botName}"`);
       let receipt: Receipt | null = null;
@@ -1738,43 +1923,60 @@ export async function cmdBotsClear(state: State): Promise<number> {
         try {
           receipt = await consoleWithReceipt(state, line);
         } catch (err) {
-          if (err instanceof NoControlChannelError) {
-            console.log(red(`  ${err.message}`));
-            return 2;
-          }
-          console.log(red(`  ${err instanceof Error ? err.message : String(err)}`));
-          return 1;
+          if (err instanceof NoControlChannelError) return "no-control";
+          return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 };
         }
         if (receipt.kind === "success") break;
       }
       if (receipt === null) continue;
       if (receipt.kind === "success") confirmed += 1;
-      else if (receipt.kind !== "silent") {
-        refused += 1;
-        console.log(red(`  踢 ${bot.name}（userid ${bot.userid}）被拒：${receipt.detail}`));
-      }
+      else if (receipt.kind !== "silent") refused += 1;
     }
   }
   const after = await fetchBots(state);
-  if (after.error) {
-    console.log(
-      yellow(`  已发出 ${confirmed} 次 kick，但清理后读不到玩家列表（${after.error}）—— 再跑一次 bots clear 确认。`),
-    );
-    return 1;
+  if (after.error) return { ok: false, error: after.error, exitCode: 1 };
+  return { ok: true, before: first.bots.length, remaining: after.bots.length, confirmed, refused };
+}
+
+export async function cmdBotsClear(state: State): Promise<number> {
+  const result = await botsClear(state);
+  if (result === "no-control") {
+    console.log(red(`  ${NO_CONTROL_MESSAGE}`));
+    return 2;
   }
-  const remaining = after.bots.length;
-  const cleaned = Math.max(0, first.bots.length - remaining);
-  console.log(green(`  已清理 ${cleaned} 个机器人（剩余 ${remaining}，引擎明确回执 ${confirmed} 次）`));
-  if (remaining > 0) {
-    console.log(yellow("  还有机器人没清掉：kick 生效与列表刷新之间有延迟，再跑一次 bots clear。"));
+  if (!result.ok) {
+    console.log(red(`  ${result.error}`));
+    return result.exitCode;
   }
-  if (refused > 0) console.log(red(`  ${refused} 次 kick 被引擎拒绝，原文见上。`));
-  return refused > 0 ? 1 : 0;
+  header("清理机器人");
+  if (result.before === 0) {
+    console.log(green("  当前没有机器人，无需清理。"));
+    return 0;
+  }
+  const cleaned = Math.max(0, result.before - result.remaining);
+  console.log(green(`  已清理 ${cleaned} 个机器人（剩余 ${result.remaining}，引擎明确回执 ${result.confirmed} 次）`));
+  if (result.remaining > 0) {
+    console.log(yellow("  还有机器人没清掉：kick 生效与列表刷新之间有延迟（或引擎明确拒绝），再跑一次 bots clear。"));
+  }
+  if (result.refused > 0) console.log(red(`  ${result.refused} 次 kick 被引擎拒绝。`));
+  return result.refused > 0 ? 1 : 0;
 }
 
 // ----------------------------------------------------------------- banlist
 
 export type BanlistOptions = { reload?: boolean; json?: boolean };
+
+export type BanlistView = {
+  /** 找到的 banlist.json 路径（引擎首次真正封禁后才生成） */
+  file: string | null;
+  /** 原样解析出的 JSON；结构由引擎/Spire 侧决定 */
+  data: unknown;
+  /** 本机台账里的临时封禁记录 */
+  ledger: ModerationEntry[];
+  reload: Receipt | null;
+};
+
+export type BanlistOutcome = { ok: false; error: string; exitCode: number } | { ok: true; view: BanlistView };
 
 /** banlist.json 的结构由引擎/Spire 侧决定 → 原样呈现键值，不硬编码 schema。 */
 function printValues(value: unknown, indent: string): void {
@@ -1802,82 +2004,96 @@ function printValues(value: unknown, indent: string): void {
   }
 }
 
-export async function cmdBanlist(state: State, opts: BanlistOptions = {}): Promise<number> {
+/** 引擎可能放 `banlist.json` 的几个位置（版本目录只读，这里只做存在性检查）。 */
+export function banlistCandidates(state: State): string[] {
   const version = currentVersion(state);
-  const candidates = version
-    ? [
-        join(version.path, "banlist.json"),
-        join(version.path, "platform", "banlist.json"),
-        join(version.path, "platform", "cfg", "banlist.json"),
-      ]
-    : [];
-  const file = candidates.find((path) => existsSync(path));
+  if (!version) return [];
+  return [
+    join(version.path, "banlist.json"),
+    join(version.path, "platform", "banlist.json"),
+    join(version.path, "platform", "cfg", "banlist.json"),
+  ];
+}
 
-  // `banlist_reload` 实测静默（命令存在、无输出）→ 静默不等于成功。
+/**
+ * 读封禁名单：引擎的 `banlist.json`（原样 JSON）+ 本机台账 + 可选的 `banlist_reload`。
+ *
+ * `banlist_reload` 实测静默（命令存在、无输出）→ 静默不等于成功，回执原样带出。
+ */
+export async function readBanlist(
+  state: State,
+  opts: { reload?: boolean } = {},
+): Promise<BanlistOutcome | "no-control"> {
+  const candidates = banlistCandidates(state);
+  const file = candidates.find((path) => existsSync(path)) ?? null;
+
   let reload: Receipt | null = null;
   if (opts.reload) {
     try {
       reload = await consoleWithReceipt(state, "banlist_reload");
     } catch (err) {
-      if (err instanceof NoControlChannelError) {
-        console.log(red(`  ${err.message}`));
-        console.log(dim("  用 r5-server restart 以托管模式重启后重试。"));
-        return 2;
-      }
-      console.log(red(`  ${err instanceof Error ? err.message : String(err)}`));
-      return 1;
+      if (err instanceof NoControlChannelError) return "no-control";
+      return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 };
     }
-    if (!opts.json) console.log(RECEIPT_TONE[reload.kind](`  ${receiptLabel(reload)}`));
   }
 
-  let parsed: unknown = null;
-  let parseError = "";
+  let data: unknown = null;
   if (file) {
     try {
-      parsed = JSON.parse(readFileSync(file, "utf8"));
+      data = JSON.parse(readFileSync(file, "utf8"));
     } catch (err) {
-      parseError = err instanceof Error ? err.message : String(err);
+      return {
+        ok: false,
+        error: `${file} 不是合法 JSON：${err instanceof Error ? err.message : String(err)}`,
+        exitCode: 1,
+      };
     }
   }
+  return { ok: true, view: { file, data, ledger: loadModeration(ROOT).entries, reload } };
+}
 
-  const ledger = loadModeration(ROOT);
+export async function cmdBanlist(state: State, opts: BanlistOptions = {}): Promise<number> {
+  const result = await readBanlist(state, opts);
+  if (result === "no-control") {
+    console.log(red(`  ${NO_CONTROL_MESSAGE}`));
+    console.log(dim("  用 r5-server restart 以托管模式重启后重试。"));
+    return 2;
+  }
+  if (!result.ok) {
+    console.log(red(`  ${result.error}`));
+    return result.exitCode;
+  }
+  const { file, data: parsed, ledger, reload } = result.view;
   const now = Date.now();
 
   if (opts.json) {
     console.log(
       JSON.stringify(
         {
-          path: file ?? null,
+          path: file,
           reload: reload ? { kind: reload.kind, detail: reload.detail } : null,
           entries: parsed,
-          local: { path: moderationPath(ROOT), entries: ledger.entries },
-          error: parseError.length > 0 ? parseError : null,
+          local: { path: moderationPath(ROOT), entries: ledger },
+          error: null,
         },
         null,
         2,
       ),
     );
-    return parseError.length > 0 ? 1 : 0;
+    return 0;
   }
+  if (reload) console.log(RECEIPT_TONE[reload.kind](`  ${receiptLabel(reload)}`));
 
   header("封禁名单");
-  printLedger(ledger.entries, now);
+  printLedger(ledger, now);
   console.log("");
-  if (!version) {
-    console.log(red("  未选择版本目录，无法定位引擎的 banlist.json。"));
-    return 1;
-  }
   if (!file) {
     console.log(dim("  引擎自己的封禁名单：本机还没有 banlist.json（引擎只在真正写入过封禁记录后才生成）。"));
-    console.log(dim(`  查找过：${candidates.join("、")}`));
+    console.log(dim(`  查找过：${banlistCandidates(state).join("、")}`));
     console.log(dim("  让引擎重新加载名单：r5-server banlist --reload"));
     return 0;
   }
   kv("引擎名单文件", file);
-  if (parseError.length > 0) {
-    console.log(red(`  无法解析：${parseError}`));
-    return 1;
-  }
   printValues(parsed, "  ");
   console.log(dim("\n  字段名由引擎决定，这里原样呈现，不做解释。"));
   return 0;
@@ -2144,39 +2360,37 @@ export async function cmdModeList(state: State, opts: { json?: boolean } = {}): 
   return 0;
 }
 
+export type ModeSetOutcome =
+  | { ok: false; error: string; exitCode: number }
+  | { ok: true; playlist: string; map: string; mode: ModeEntry | null; receipt: Receipt };
+
 /** 运行期一步热切模式+地图；省略 map 时用模式默认地图。 */
-export async function cmdModeSet(state: State, playlist: string, map?: string): Promise<number> {
+export async function setLiveMode(
+  state: State,
+  playlist: string,
+  map?: string,
+): Promise<ModeSetOutcome | "no-control"> {
   const id = playlist.trim();
-  if (id.length === 0) {
-    console.log(red("用法：r5-server mode set <playlist> [map]"));
-    return 1;
-  }
-  if (!state.runtime?.ctlPort || !state.runtime.ctlToken) {
-    console.log(red("  没有正在运行的实例：bridge_setmode 是运行期热切，需要先启动。"));
-    console.log(dim(`  它不写启动设置；要长期固定：r5-server settings --playlist ${id} --map <map>`));
-    return 2;
-  }
+  if (id.length === 0) return { ok: false, error: "用法：r5-server mode set <playlist> [map]", exitCode: 1 };
+  if (!state.runtime?.ctlPort || !state.runtime.ctlToken) return "no-control";
   const version = currentVersion(state);
   const families: ModeFamily[] = version ? await collectModes(version.path) : [];
   const modes = families.flatMap((family) => family.modes);
-  const mode = modes.find((entry) => entry.id === id);
+  const mode = modes.find((entry) => entry.id === id) ?? null;
   const chosenMap = (map ?? "").trim() || mode?.map || mapsForPlaylist(modes, id)[0] || "";
   if (chosenMap.length === 0) {
-    console.log(red(`  无法确定「${id}」的地图：引擎用法是 bridge_setmode <playlist> <map>，两个参数都不能省。`));
-    console.log(dim(`  显式指定：r5-server mode set ${id} mp_rr_arena_habitat`));
-    return 1;
+    return {
+      ok: false,
+      error: `无法确定「${id}」的地图：引擎用法是 bridge_setmode <playlist> <map>，两个参数都不能省。`,
+      exitCode: 1,
+    };
   }
-  if (!mode) console.log(yellow(`  提示：「${id}」不在本地模式目录里，仍按你给的值发送。`));
   let receipt: Receipt;
   try {
     receipt = await consoleWithReceipt(state, `bridge_setmode ${id} ${chosenMap}`);
   } catch (err) {
-    if (err instanceof NoControlChannelError) {
-      console.log(red(`  ${err.message}`));
-      return 2;
-    }
-    console.log(red(`  ${err instanceof Error ? err.message : String(err)}`));
-    return 1;
+    if (err instanceof NoControlChannelError) return "no-control";
+    return { ok: false, error: err instanceof Error ? err.message : String(err), exitCode: 1 };
   }
   if (state.runtime) {
     const live = parseLiveLevel(receipt.lines);
@@ -2187,10 +2401,26 @@ export async function cmdModeSet(state: State, playlist: string, map?: string): 
       saveState(state);
     }
   }
+  return { ok: true, playlist: id, map: chosenMap, mode, receipt };
+}
+
+export async function cmdModeSet(state: State, playlist: string, map?: string): Promise<number> {
+  const result = await setLiveMode(state, playlist, map);
+  if (result === "no-control") {
+    console.log(red("  没有正在运行的实例：bridge_setmode 是运行期热切，需要先启动。"));
+    console.log(dim(`  它不写启动设置；要长期固定：r5-server settings --playlist ${playlist.trim()} --map <map>`));
+    return 2;
+  }
+  if (!result.ok) {
+    console.log(red(`  ${result.error}`));
+    return result.exitCode;
+  }
+  if (!result.mode) console.log(yellow(`  提示：「${result.playlist}」不在本地模式目录里，仍按你给的值发送。`));
+  const { receipt } = result;
   console.log(RECEIPT_TONE[receipt.kind](receiptLabel(receipt)));
   if (receipt.kind === "silent") for (const extra of receipt.lines) console.log(dim(`    ${extra}`));
   if (receipt.kind === "success") {
-    const live = parseLiveLevel(receipt.lines) ?? { playlist: id, map: chosenMap };
+    const live = parseLiveLevel(receipt.lines) ?? { playlist: result.playlist, map: result.map };
     console.log(dim(`  引擎已确认换图：模式 ${live.playlist} · 地图 ${live.map}（本次运行；改启动设置用 settings）`));
   } else if (receipt.kind === "silent") {
     console.log(dim("  引擎没有回确认行：换图是否成功要玩家端看实际地图，别按这里的话断言成功。"));

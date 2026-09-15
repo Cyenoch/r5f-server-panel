@@ -1,0 +1,44 @@
+[package]
+name = "r5-server-gui"
+version = "2.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "R5Flowstate 服务端管理面板的原生宿主（solid-gpui）"
+
+# 独立 workspace：solid-gpui 的 [patch.crates-io] 与 profile 只对 workspace 根生效，
+# 这里必须把 vendored gpui 的替换重写一遍，否则会去 crates.io 取未打补丁的 gpui-pre。
+[workspace]
+
+[[bin]]
+name = "r5-server-gui"
+path = "src/main.rs"
+
+[dependencies]
+solid-gpui = { path = "../../vendor/solid-gpui/crates/solid-gpui", features = ["gpui-component"] }
+gpui-component = { path = "../../vendor/solid-gpui/vendor/gpui-kit/crates/component" }
+
+[profile.dev]
+debug = 1
+
+# 与 vendor/solid-gpui/Cargo.toml 保持一致：布局与场景构建在 dev 下也要优化，
+# 否则滚动与日志区的帧耗时会比发布版差一个数量级。
+[profile.dev.package.gpui-pre]
+opt-level = 3
+
+[profile.dev.package.taffy]
+opt-level = 3
+
+[profile.dev.package.slotmap]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[patch.crates-io]
+gpui-pre-reqwest-client = { path = "../../vendor/solid-gpui/vendor/gpui-reqwest-client" }
+gpui-pre = { path = "../../vendor/solid-gpui/vendor/gpui" }
+gpui-pre-web = { path = "../../vendor/solid-gpui/vendor/gpui-web" }
+gpui-pre-wgpu = { path = "../../vendor/solid-gpui/vendor/gpui-wgpu" }
+gpui-pre-windows = { path = "../../vendor/solid-gpui/vendor/gpui-windows" }

@@ -26,5 +26,13 @@
     "backups/**",
     "node_modules/**",
     "dist/**",
+    // solid-gpui 子模块：第三方源码，不归本仓库的风格管辖。
+    "vendor/**",
+    // 路由生成产物（文件头明确要求排除）。
+    "desktop/src/routeTree.gen.ts",
+    "desktop/src/generated/**",
+    "desktop/native/target/**",
+    // 由 desktop 构建后拷到根目录的 JS 包。
+    "r5-server-gui.js",
   ],
 }

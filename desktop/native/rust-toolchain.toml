@@ -1,0 +1,4 @@
+# 与 vendor/solid-gpui/rust-toolchain.toml 对齐：宿主链接 vendored gpui，工具链必须一致。
+[toolchain]
+channel = "1.98.1"
+profile = "minimal"

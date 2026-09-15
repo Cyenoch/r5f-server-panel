@@ -181,6 +181,11 @@ export function getProcess(pid: number): ProcInfo | null {
   return parseProcJson(ps(processQuery(`-Id ${pid}`)).out)[0] ?? null;
 }
 
+/** 同一份查询的非阻塞版本：面板按秒轮询，绝不能在渲染循环里跑 spawnSync。 */
+export async function getProcessAsync(pid: number): Promise<ProcInfo | null> {
+  return parseProcJson((await psAsync(processQuery(`-Id ${pid}`))).out)[0] ?? null;
+}
+
 export function findDediProcesses(name = "r5apex_ds"): ProcInfo[] {
   return parseProcJson(ps(processQuery(`-Name ${name}`)).out);
 }

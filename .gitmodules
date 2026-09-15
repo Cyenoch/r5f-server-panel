@@ -1,0 +1,3 @@
+[submodule "vendor/solid-gpui"]
+	path = vendor/solid-gpui
+	url = https://github.com/Cyenoch/solid-gpui.git

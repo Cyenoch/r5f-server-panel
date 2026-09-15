@@ -19,6 +19,12 @@ export type Settings = {
   map: string;
   playlist: string;
   hostname: string;
+  /**
+   * 对外上报的地址（cvar `hostip`）。NAT 主机上引擎自测只能得到 `[::1]:0`，
+   * 主服据此判服务器不可达 —— 所以要用 `+hostip <公网IP>[:端口]` 显式改写。
+   * 留空 = 不传这个参数（引擎用自测值）。
+   */
+  hostip: string;
   visibility: Visibility;
   authMode: AuthMode;
   password: string;
@@ -39,6 +45,17 @@ export type LiveLevel = {
   map: string;
   /** 记下回执的时刻（ISO） */
   at: string;
+};
+
+/**
+ * 一份命名的启动配置档案：`state.settings` 是**正在生效**的那份，档案是可以随时
+ * 切回去的历史值。启动对话框选档案 = 把档案的 settings 复制进 `state.settings`，
+ * 所以 CLI（只读 `settings`）看到的行为不会因为多了档案而改变。
+ */
+export type Profile = {
+  name: string;
+  settings: Settings;
+  updatedAt: string;
 };
 
 export type Runtime = {
@@ -67,12 +84,20 @@ export type HistoryEntry = {
 export type State = {
   current: string | null;
   settings: Settings;
+  /** 命名配置档案；永远至少有一条，`currentProfile` 指向正在生效的那条 */
+  profiles: Profile[];
+  currentProfile: string;
   runtime: Runtime | null;
   history: HistoryEntry[];
+  /** 面板上次停在哪一页：桌面端重开时回到原处，CLI 不读也不写。 */
+  panelRoute?: string;
 };
 
 /** The directory holding r5-server.exe, its state file and one dir per version. */
 function detectRoot(): string {
+  // 桌面端：宿主进程与 JS 子进程的 cwd/argv 都不是实例根目录，只能由宿主显式给出。
+  const declared = process.env.R5_SERVER_ROOT;
+  if (declared !== undefined && declared.trim().length > 0) return resolve(declared);
   const base = basename(process.execPath).toLowerCase();
   if (base === "bun.exe" || base === "bun") return resolve(import.meta.dir, "..");
   return dirname(process.execPath);
@@ -87,6 +112,7 @@ export const defaultSettings: Settings = {
   map: "mp_rr_arena_habitat",
   playlist: "fs_1v1",
   hostname: "R5F Server",
+  hostip: "",
   visibility: 0,
   authMode: 0,
   password: "",
@@ -97,6 +123,9 @@ export const defaultSettings: Settings = {
   logRetention: 10,
   extra: "",
 };
+
+/** 没有任何档案时的档案名（也用于旧状态文件的迁移）。 */
+export const DEFAULT_PROFILE = "默认配置";
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
@@ -117,6 +146,7 @@ function readSettings(raw: unknown): Settings {
     map: readString(o.map, defaultSettings.map),
     playlist: readString(o.playlist, defaultSettings.playlist),
     hostname: readString(o.hostname, defaultSettings.hostname),
+    hostip: readString(o.hostip, defaultSettings.hostip),
     visibility: clamp(readNumber(o.visibility, 0), 0, 2) as Visibility,
     authMode: clamp(readNumber(o.authMode, 0), 0, 2) as AuthMode,
     password: readString(o.password, ""),
@@ -157,16 +187,49 @@ function readLive(raw: unknown): LiveLevel | undefined {
   return { playlist, map, at: readString(o.at, "") };
 }
 
+function readProfiles(raw: unknown, settings: Settings): { profiles: Profile[]; currentProfile: string } {
+  const list = Array.isArray(raw) ? raw : [];
+  const seen = new Set<string>();
+  const profiles: Profile[] = [];
+  for (const entry of list) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const o = entry as Record<string, unknown>;
+    const name = readString(o.name, "").trim();
+    if (name.length === 0 || seen.has(name)) continue;
+    seen.add(name);
+    profiles.push({ name, settings: readSettings(o.settings), updatedAt: readString(o.updatedAt, "") });
+  }
+  // 旧状态文件（或档案被清空）时补一份默认档案，让 `currentProfile` 永远指向真实存在的一条。
+  if (profiles.length === 0) {
+    profiles.push({ name: DEFAULT_PROFILE, settings: { ...settings }, updatedAt: new Date().toISOString() });
+  }
+  return { profiles, currentProfile: profiles[0].name };
+}
+
 export function loadState(): State {
   if (!existsSync(STATE_FILE)) {
-    return { current: null, settings: { ...defaultSettings }, runtime: null, history: [] };
+    return {
+      current: null,
+      settings: { ...defaultSettings },
+      profiles: [{ name: DEFAULT_PROFILE, settings: { ...defaultSettings }, updatedAt: new Date().toISOString() }],
+      currentProfile: DEFAULT_PROFILE,
+      runtime: null,
+      history: [],
+    };
   }
   try {
     const o = JSON.parse(readFileSync(STATE_FILE, "utf8")) as Record<string, unknown>;
     const historyRaw = Array.isArray(o.history) ? o.history : [];
+    const settings = readSettings(o.settings);
+    const named = readProfiles(o.profiles, settings);
+    const wanted = readString(o.currentProfile, "");
+    const panelRoute = typeof o.panelRoute === "string" && o.panelRoute.startsWith("/") ? o.panelRoute : undefined;
     return {
+      panelRoute,
       current: typeof o.current === "string" && o.current.length > 0 ? o.current : null,
-      settings: readSettings(o.settings),
+      settings,
+      profiles: named.profiles,
+      currentProfile: named.profiles.some((p) => p.name === wanted) ? wanted : named.currentProfile,
       runtime: readRuntime(o.runtime),
       history: historyRaw
         .filter((h): h is Record<string, unknown> => typeof h === "object" && h !== null)
@@ -192,4 +255,15 @@ export function saveState(state: State): void {
 export function record(state: State, action: string, detail: string): void {
   state.history.unshift({ at: new Date().toISOString(), action, detail });
   state.history = state.history.slice(0, 50);
+}
+
+/**
+ * 把生效设置写回正在生效的档案。任何改动 `settings` 的路径都要调用它，
+ * 否则档案会停在旧值、下次"用这个档案启动"就把改动悄悄吃掉。
+ */
+export function syncActiveProfile(state: State): void {
+  const active = state.profiles.find((profile) => profile.name === state.currentProfile);
+  if (!active) return;
+  active.settings = { ...state.settings };
+  active.updatedAt = new Date().toISOString();
 }

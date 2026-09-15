@@ -3,9 +3,9 @@
   "$schema": "./node_modules/oxlint/configuration_schema.json",
 
   // 默认插件集是 eslint / typescript / unicorn / oxc；这里全量重列，
-  // 因为 plugins 字段会覆盖默认值。react 供 ink 的 TSX 使用，
-  // import 提供跨文件分析（no-cycle）。
-  "plugins": ["eslint", "typescript", "unicorn", "oxc", "react", "import"],
+  // 因为 plugins 字段会覆盖默认值。import 提供跨文件分析（no-cycle）。
+  // 不启用 react：TUI（ink）已删除，桌面端用 Solid，规则集不适用。
+  "plugins": ["eslint", "typescript", "unicorn", "oxc", "import"],
 
   // 运行时：Node 全局（process / console / Buffer / Response…）。
   // bun 专有全局不在 env 里，单独声明。
@@ -61,5 +61,21 @@
   // 目录遍历本身已按 .gitignore 过滤，这里只补 .gitignore 管不到的部分：
   // 一次性探针脚本、工作笔记（.scratch 里除了规格文档还常有验证用 .ts）、
   // 以及 vendored 的 skill 正文。
-  "ignorePatterns": [".tmp/**", "tmp-*.ts", ".scratch/**", ".agents/**", "node_modules/**", "dist/**"]
+  "ignorePatterns": [
+    ".tmp/**",
+    "tmp-*.ts",
+    ".scratch/**",
+    ".agents/**",
+    "node_modules/**",
+    "dist/**",
+    // solid-gpui 子模块：第三方源码，有自己的 lint/format 约定，不归本仓库管。
+    "vendor/**",
+    // desktop/scripts/stage.ts 拷到根目录的 JS 包（与 r5-server.exe 同级的产物）。
+    "r5-server-gui.js",
+    // 路由生成产物：文件头明确要求排除在 linter/formatter 之外。
+    "desktop/src/routeTree.gen.ts",
+    // 由宿主 --export-native 生成的原生契约，同样是产物。
+    "desktop/src/generated/**",
+    "desktop/native/target/**"
+  ]
 }

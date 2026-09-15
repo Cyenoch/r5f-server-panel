@@ -1,19 +1,18 @@
-import { Command, CommanderError } from "commander";
-import { render } from "ink";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 /**
  * r5-server entry point.
  *
- *   r5-server                 Ink dashboard (interactive)
+ *   r5-server                 help（交互式面板是 r5-server-gui.exe）
+ *   r5-server gui             启动桌面面板
  *   r5-server <command>       commander-parsed subcommand, script friendly
  *   r5-server __logd ...      hidden hosted-console daemon
  *
- * Argument parsing: commander. Dashboard: Ink. Everything else is shared with
- * the plain CLI path, so a scheduled task and an interactive operator run the
- * same code.
+ * Argument parsing: commander. 交互面板在 `desktop/`（solid-gpui），
+ * 命令实现两边共用 `commands.ts`，所以定时任务与人在面板上点的是同一套代码。
  */
-import React from "react";
+import { Command, CommanderError } from "commander";
 import {
-  applySettingInPlace,
   cmdAnnounce,
   cmdAnnouncements,
   cmdAutostart,
@@ -40,11 +39,9 @@ import {
   cmdUse,
   type SettingChange,
 } from "./commands";
-import type { Route } from "./keys";
 import { type FieldId } from "./settings-fields";
 import { ROOT, loadState } from "./state";
-import { runLogDaemon, selfCommand, stripAnsi } from "./tap";
-import { Dashboard } from "./tui";
+import { runLogDaemon } from "./tap";
 import { closePrompt, red } from "./ui";
 import { initConsole } from "./win";
 
@@ -482,11 +479,11 @@ function buildProgram(): Command {
     });
 
   program
-    .command("tui")
-    .description("打开交互式面板")
-    .option("--no-follow", "日志不自动跟随")
-    .action(async (opts: { follow?: boolean }) => {
-      process.exitCode = await tuiLoop(opts.follow !== false);
+    .command("gui")
+    .description("打开桌面面板（r5-server-gui.exe）")
+    .option("--production", "以发布模式启动（读 dist 里的 JS 包，而不是 Vite）")
+    .action(async (opts: { production?: boolean }) => {
+      process.exitCode = launchGui(Boolean(opts.production));
     });
 
   // hidden: hosted-console daemon (spawned by `start`)
@@ -521,12 +518,10 @@ function buildProgram(): Command {
       },
     );
 
-  program.action(async () => {
-    if (!process.stdout.isTTY || !process.stdin.isTTY) {
-      program.help();
-      return;
-    }
-    process.exitCode = await tuiLoop(true);
+  // 不带子命令即打开桌面面板：这个 exe 对服主来说就是"服务器面板"，
+  // 帮助仍然可以用 `--help` 显式取。
+  program.action(() => {
+    process.exitCode = launchGui(false);
   });
 
   return program;
@@ -577,59 +572,27 @@ function settingsFromOptions(opts: Record<string, unknown>): SettingChange[] {
     .map((entry) => ({ id: entry.id, raw: entry.value }));
 }
 
-/** Forward a byte stream to `onLine`, one line at a time. */
-async function pumpLines(
-  stream: ReadableStream<Uint8Array> | undefined,
-  onLine: (line: string) => void,
-): Promise<void> {
-  if (!stream) return;
-  const decoder = new TextDecoder();
-  let buffer = "";
-  const emit = (text: string): void => {
-    const line = stripAnsi(text).replace(/\s+$/, "");
-    if (line.length > 0) onLine(line);
-  };
-  for await (const chunk of stream) {
-    buffer += decoder.decode(chunk, { stream: true });
-    const parts = buffer.split(/\r?\n/);
-    buffer = parts.pop() ?? "";
-    for (const line of parts) emit(line);
-  }
-  buffer += decoder.decode();
-  emit(buffer);
-}
-
 /**
- * Run an action in a child process and stream its output into the dashboard's
- * log pane. The child has no TTY, so `ui.ts` drops colours by itself and the
- * panel keeps the screen.
+ * 打开桌面面板：宿主进程独立存活，CLI 不等它结束（面板关掉不影响正在跑的实例）。
+ * `--production` 只对开发构建有意义（不经过 Vite），发布形态本来就是 production。
  */
-async function runCaptured(argv: string[], onLine: (line: string) => void): Promise<number> {
-  const proc = Bun.spawn({
-    cmd: selfCommand(argv),
-    stdout: "pipe",
-    stderr: "pipe",
+function launchGui(production: boolean): number {
+  const exe = join(ROOT, "r5-server-gui.exe");
+  if (!existsSync(exe)) {
+    process.stderr.write(`${red(`找不到桌面面板：${exe}`)}\n`);
+    process.stderr.write("  从源码构建：cd desktop && bun install && bun run host:build && bun run stage\n");
+    return 1;
+  }
+  const child = Bun.spawn({
+    cmd: production ? [exe, "--production"] : [exe],
+    cwd: ROOT,
     stdin: "ignore",
-    env: process.env,
+    stdout: "ignore",
+    stderr: "inherit",
+    detached: true,
   });
-  await Promise.all([
-    pumpLines(proc.stdout as ReadableStream<Uint8Array>, onLine),
-    pumpLines(proc.stderr as ReadableStream<Uint8Array>, onLine),
-  ]);
-  return await proc.exited;
-}
-
-/** Dashboard loop: everything happens inside the panel. */
-async function tuiLoop(follow: boolean): Promise<number> {
-  const app = render(
-    React.createElement(Dashboard, {
-      initialFollow: follow,
-      initialRoute: "main" as Route,
-      runCommand: runCaptured,
-      applySetting: applySettingInPlace,
-    }),
-  );
-  await app.waitUntilExit();
+  child.unref();
+  console.log(`已启动桌面面板（pid ${child.pid}）。`);
   return 0;
 }
 

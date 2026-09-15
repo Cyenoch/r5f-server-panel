@@ -156,7 +156,7 @@ export const SETTINGS_FIELDS: FieldDef[] = [
     engineName: "+launchplaylist",
     hint: "要跑的玩法。清单来自服务端自带的模式目录，按家族分组（1v1 在最前）；留空表示启动后由玩家选择。",
     spec: "从模式清单选择，或手动输入模式 id",
-    scope: "重启服务器后生效；运行中可在本页按 x 立即切换",
+    scope: "重启服务器后生效；运行中可在控制面板立即切换",
     display: (s) => (s.playlist.length === 0 ? "(空 = 由玩家选择)" : s.playlist),
     defaultText: () => "fs_1v1",
     defaultValue: "fs_1v1",
@@ -182,6 +182,39 @@ export const SETTINGS_FIELDS: FieldDef[] = [
       ];
     },
     parse: (raw) => ({ ok: true, value: raw.trim() }),
+  },
+  {
+    id: "hostip",
+    label: "公网地址",
+    kind: "text",
+    engineName: "+hostip",
+    hint: "对外公布的地址。放在 NAT 或云主机后面时必须填公网 IP，否则服务器报给主服的地址是 [::1]:0，别人在列表里看不到你。留空 = 不填这一项。",
+    spec: "公网 IP，或 IP:端口（端口省略时用游戏端口）",
+    scope: "重启服务器后生效",
+    display: (s) => (s.hostip.trim().length === 0 ? "(未设置，由服务器自动探测)" : s.hostip),
+    defaultText: () => "(未设置)",
+    defaultValue: "",
+    assign: (s, value) => {
+      s.hostip = String(value);
+    },
+    editText: (s) => s.hostip,
+    parse: (raw) => {
+      const text = raw.trim();
+      if (text.length === 0) return { ok: true, value: "" };
+      const [host, port, ...rest] = text.split(":");
+      if (rest.length > 0) return { ok: false, error: "格式应为 IP 或 IP:端口" };
+      const octets = host.split(".");
+      const v4 =
+        octets.length === 4 &&
+        octets.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255 && String(Number(part)) === part);
+      if (!v4) return { ok: false, error: "只支持 IPv4 地址（这一版服务端只上报 IPv4）" };
+      if (port !== undefined) {
+        if (!/^\d{1,5}$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+          return { ok: false, error: "端口必须是 1–65535 的数字" };
+        }
+      }
+      return { ok: true, value: text };
+    },
   },
   {
     id: "visibility",
@@ -271,18 +304,18 @@ export const SETTINGS_FIELDS: FieldDef[] = [
     label: "公告轮播",
     kind: "enum",
     engineName: "bridge_chat_announce",
-    hint: "开启后引擎会把公告文案轮播给在线玩家，并在玩家进入时发欢迎语；关闭（引擎默认）则一条都不发。运行中可在公告页按 t 立即开关。",
-    spec: "开启 / 关闭（引擎默认）",
+    hint: "开启后会定时把公告轮播给所有在线玩家，并在玩家加入时单独发一条欢迎语；关闭则一条都不发。运行中可在公告页随时开关。",
+    spec: "开启 / 关闭（默认关闭）",
     scope: "重启服务器后生效；运行中可在公告页立即开关",
-    display: (s) => (s.announceRotate === "on" ? "开启（轮播 + 进场欢迎）" : "关闭（引擎默认，不发公告）"),
-    defaultText: () => "关闭（引擎默认）",
+    display: (s) => (s.announceRotate === "on" ? "开启（轮播 + 进场欢迎）" : "关闭（不发公告）"),
+    defaultText: () => "关闭（默认）",
     defaultValue: "default",
     assign: (s, value) => {
       s.announceRotate = value === "on" ? "on" : "default";
     },
     editText: (s) => s.announceRotate,
     options: () => [
-      { value: "default", label: "关闭（引擎默认）", note: "引擎不广播任何公告" },
+      { value: "default", label: "关闭（默认）", note: "一条公告都不发" },
       { value: "on", label: "开启", note: "按文案表轮播，并给进入的玩家发欢迎语" },
       { value: MANUAL_OPTION, label: "（手动输入…）" },
     ],

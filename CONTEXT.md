@@ -17,9 +17,10 @@ r5-server 的领域词汇表与模块地图。文档基建：`AGENTS.md`（约�
 | **日志守护（`__logd`）**    | 分离进程：持有引擎的输出/输入管道，把控制台输出追加到日志文件，并把控制口收到的命令写进引擎输入管道。CLI/面板退出后仍存活                                     |
 | **控制通道**                | `127.0.0.1:<ctlPort>` + 随机令牌（首行 `AUTH <token>`）。面板/CLI → 守护 → 引擎控制台。**等价 RCON，但不新增公网端口**                                        |
 | **回执（receipt）**         | 引擎对命令的回答分类：`success`（明确动作行）/ `unknown`（`Command 'x' doesn't exist`）/ `usage`（参数用法）/ `silent`（命令存在但无输出）。静默 ≠ 成功       |
-| **面板（TUI）**             | Ink 界面：主页（版本 + 实例 + 实时日志）、详情、体检、主机配置、游戏设置、在线玩家、（规划中）封禁名单与公告                                                  |
+| **面板（GUI）**             | solid-gpui 原生窗口：首页、服务器列表/实例/实时日志/玩家列表/控制面板、配置档案与启动设置、模式与地图、公告、主机配置、体检、封禁名单、启动引导               |
+| **配置档案（profile）**     | 一组命名启动设置的快照；`state.settings` 始终是**生效值**，激活档案＝把它拷进 `settings`。启动对话框默认选 `currentProfile`（上次用的那份）                   |
 | **健康（health）**          | 引擎每次运行写 `platform/logs/server/<uuid>/{error,warning,script_warning}.log`，`latest.txt` 指向本次。`error.log` 非空即本次运行有问题                      |
-| **日志分片**                | 本工具把每次启动的输出写到 `logs/<版本>-<端口>-<时间>.log`，保留最近 N 份（`settings.logRetention`）                                                          |
+| **日志分片**                | 本工具把每次启动的输出写到 `logs/<版本>-<端口>-<时间>.log`，保留最近 N 份（`settings.logRetention`）；面板「实时日志」页可在分片间回看                        |
 | **模式（playlist / mode）** | R5F 的玩法条目，位于 `platform/playlists_r5_patch.txt`；带 `r5f_mode_*` 元数据的构成**模式目录**，按 family 分组（`1v1` / `flowstate` / `mixtape` / `apex`…） |
 | **公告表**                  | `platform/datatable/chat_announcements.csv`：轮播（rotate）与进场（welcome）文案，字段 `kind,tag,text,color,sustain,fade,wait`；改动需 changelevel 或重启     |
 | **爬虫（bot）**             | 用 `spawnbots <count>` / `sv_addbot <name> <teamid>` 造的假玩家（`uniqueid == "0"`，无地址）；**不可封禁**，只能踢                                            |
@@ -28,33 +29,31 @@ r5-server 的领域词汇表与模块地图。文档基建：`AGENTS.md`（约�
 
 ## 模块地图（`src/`）
 
-| 文件                 | 职责                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| `cli.tsx`            | commander 入口；所有子命令；help 中文化（输出层）                                          |
-| `commands.ts`        | 命令实现：启动/停止/重启/升级/设置/玩家/控制台/日志…；构造启动参数；控制通道客户端         |
-| `state.ts`           | `r5-server.json` 的读写与容错（`Settings`/`Runtime`/`HistoryEntry`）                       |
-| `versions.ts`        | 版本目录发现、备份、切换                                                                   |
-| `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源                 |
-| `tap.ts`             | `__logd` 日志守护：管道、日志文件、控制口；日志尾部/增量读（水位线）                       |
-| `inspect.ts`         | 面板数据采集：详情、体检、主机能力、（规划中）健康                                         |
-| `ui.ts`              | 渲染原语（`kv` 按显示宽度对齐、`truncate`、`padEndWidth`、带插入点的 `renderField`、色调） |
-| `tui.tsx`            | Ink 界面与路由；动作子进程化（输出进日志区，按到达顺序与引擎日志归并）                     |
-| `keys.ts`            | 纯函数按键路由（路由 + 状态迁移，可单测）                                                  |
-| `settings-fields.ts` | **唯一**的设置项声明表：渲染、校验、CLI、TUI 共用                                          |
-| `settings-edit.ts`   | 设置编辑状态机（browse/input/pick）                                                        |
-| `text-field.ts`      | 一行文本 + 插入点的纯模型（设置、控制台、公告文字行共用；按码点移动）                      |
-| `catalog.ts`         | 从版本目录读真实清单：地图名、playlist、（规划中）模式目录                                 |
-| `cfg.ts`             | 读/校验/行级重写引擎 cfg（`shell-quote` 解析）                                             |
-| `serverinfo.ts`      | 日志摘要与 status 头部解析                                                                 |
-| `stubs/`             | 编译 exe 用的替身（`react-devtools-core`）                                                 |
+| 文件                 | 职责                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------ |
+| `cli.tsx`            | commander 入口；所有子命令；help 中文化（输出层）                                    |
+| `commands.ts`        | 命令实现：启动/停止/重启/升级/设置/玩家/控制台/日志…；构造启动参数；控制通道客户端   |
+| `state.ts`           | `r5-server.json` 的读写与容错（`Settings`/`Runtime`/`HistoryEntry`）                 |
+| `versions.ts`        | 版本目录发现、备份、切换                                                             |
+| `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源           |
+| `tap.ts`             | `__logd` 日志守护：管道、日志文件、控制口；日志尾部/增量读（水位线）                 |
+| `inspect.ts`         | 面板数据采集：详情、体检、主机能力、（规划中）健康                                   |
+| `settings-fields.ts` | **唯一**的设置项声明表：渲染、校验、CLI、面板共用                                    |
+| `panel.ts`           | 面板的稳定 API 面：实例快照、日志读取器、动作、档案、清单、公告、健康、封禁台账      |
+| `catalog.ts`         | 从版本目录读真实清单：地图名、playlist、模式目录（按家族分组）                       |
+| `cfg.ts`             | 读/校验/行级重写引擎 cfg（`shell-quote` 解析）                                       |
+| `serverinfo.ts`      | 日志摘要与 status 头部解析                                                           |
+| `gui.ts`             | 面板启动器：定位 `r5-server-gui.exe` 并分离启动（`desktop/` 是它加载的 JS/原生宿主） |
+
+界面代码不在 `src/` 下，而在 `desktop/src/`：路由、外壳、会话 store、UI 组件；`desktop/native/` 是原生宿主（Rust）。二者只通过 `src/panel.ts` 与 `src/*.ts` 的逻辑层交互。
 
 ## 不变量（改代码时必须保持）
 
 1. **面板值优先于引擎 cfg**：启动前同步已存在的 cvar 行，不新增注入命令。
-2. **一次声明，处处一致**：设置项只在 `settings-fields.ts` 声明；CLI 与 TUI 不得各写一套校验。
+2. **一次声明，处处一致**：设置项只在 `settings-fields.ts` 声明；CLI 与面板不得各写一套校验。
 3. **不虚构引擎能力**：命令/参数必须有实测或 `server.dll` 证据；不支持的能力写进文档并标注未验证。
 4. **输出如实**：静默、未验证、猜测都要显式标注。
-5. **面板不出现引擎术语**：cvar 名、引擎命令名、文件路径、引擎内部文件名（`error.log` 等）、UUID、pid 一律只在 CLI 出现；面板说人话（`错误记录`、`重新加载封禁名单`、`地图 Habitat · 模式 1v1`）。日志区例外 —— 那是引擎原样输出，排障要看原文。字段的引擎侧名字挂在 `FieldDef.engineName` 上，只由 CLI 的设置表显示。
+5. **面板说人话，不泄露标识**：设置项不显示 cvar 名（挂在 `FieldDef.engineName`，只给 CLI）；**UUID 任何位置都不出现全量**（运行编号只显示前 8 位）；pid、端口、日志/名单文件路径属于运维必需信息，允许出现在实例、日志、封禁名单页。日志与 `banlist.json` 原文例外 —— 那是引擎原样输出，排障要看原文。
 6. **Windows 脚本 ASCII**：`*.bat`/`*.ps1` 内容保持 ASCII（中文 Windows 的 ANSI 解析会毁 UTF-8 无 BOM）。
 7. **无 `any`**：`unknown` + 类型守卫；静态映射用 `Record`；已发布契约用具名类型。
 8. **版本目录尽量只读**：只写引擎自写文件与用户明确要编辑的 `chat_announcements.csv`。
@@ -80,3 +79,4 @@ r5-server 的领域词汇表与模块地图。文档基建：`AGENTS.md`（约�
 - 增强点与状态：`.scratch/fleet-ops/roadmap.md`
 - 执行契约：`.scratch/fleet-ops/issues/NN-*.md`
 - 用户手册：`README.md`
+- 桌面端踩坑记录（solid-gpui）：`docs/solid-gpui-notes.md`

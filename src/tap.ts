@@ -272,13 +272,35 @@ export function isPidAlive(pid: number): boolean {
  * bun, so the script has to be passed explicitly.
  */
 export function selfCommand(extraArgs: string[]): string[] {
+  return [...daemonPrefix(), ...extraArgs];
+}
+
+/**
+ * 重新进入 CLI 的 argv 前缀。
+ *
+ * 从 `r5-server.exe` 或 `bun run src/cli.tsx` 自己启动时看 `process.execPath` 就够；
+ * 但桌面端的宿主进程是 GUI，`process.argv[1]` 是面板 JS 而不是 CLI，所以宿主用
+ * `R5_SERVER_DAEMON`（JSON 数组）显式告诉子进程该跑什么。
+ */
+function daemonPrefix(): string[] {
+  const configured = process.env.R5_SERVER_DAEMON;
+  if (configured) {
+    try {
+      const parsed: unknown = JSON.parse(configured);
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((part) => typeof part === "string")) {
+        return parsed;
+      }
+    } catch {
+      /* 坏值退回自省 */
+    }
+  }
   const exe = process.execPath;
   const leaf = exe.split(/[\\/]/).pop()?.toLowerCase() ?? "";
   if (leaf === "bun.exe" || leaf === "bun") {
     const script = process.argv[1];
-    if (script && existsSync(script)) return [exe, "run", script, ...extraArgs];
+    if (script && existsSync(script)) return [exe, "run", script];
   }
-  return [exe, ...extraArgs];
+  return [exe];
 }
 
 /** Last `count` lines of a file, read from the tail without loading everything. */

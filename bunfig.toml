@@ -8,3 +8,8 @@
 # package.json 的 range 一起改到冷却期内最新的版本）。
 [install]
 minimumReleaseAge = 86400
+
+# 工作区依赖必须爬到仓库根的 node_modules：vendor/solid-gpui 里的包按裸包名
+# （vite、@tanstack/*、solid-js…）导入依赖，Node/Bun 只按目录向上查 node_modules，
+# 嵌套安装在 desktop/node_modules 里的依赖它们永远看不到。
+linker = "hoisted"
