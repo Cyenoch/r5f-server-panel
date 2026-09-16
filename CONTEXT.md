@@ -9,23 +9,23 @@ r5-server 的领域词汇表与模块地图。文档基建：`AGENTS.md`（约�
 
 ## 领域词汇
 
-| 术语                        | 含义                                                                                                                                                          |
-| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **版本目录**                | `r5f-dedi-<版本>/`，一个完整的服务端版本（约 4.16 GB）。同时可存在多个；`state.current` 指向当前生效者                                                        |
-| **实例**                    | 一次运行中的服务端进程（`r5apex_ds.exe`），由 `state.runtime` 描述：pid、游戏端口、启动时间、日志、控制通道                                                   |
-| **托管控制台**              | 以 `R5F_HOSTED_CONSOLE`/`R5F_CONSOLE_PIPE`/`R5F_CONSOLE_IN`/`R5F_CONSOLE_ROLE` 环境变量启动引擎的模式；引擎的控制台输出经命名管道流出，输入经管道流入         |
-| **日志守护（`__logd`）**    | 分离进程：持有引擎的输出/输入管道，把控制台输出追加到日志文件，并把控制口收到的命令写进引擎输入管道。CLI/面板退出后仍存活                                     |
-| **控制通道**                | `127.0.0.1:<ctlPort>` + 随机令牌（首行 `AUTH <token>`）。面板/CLI → 守护 → 引擎控制台。**等价 RCON，但不新增公网端口**                                        |
-| **回执（receipt）**         | 引擎对命令的回答分类：`success`（明确动作行）/ `unknown`（`Command 'x' doesn't exist`）/ `usage`（参数用法）/ `silent`（命令存在但无输出）。静默 ≠ 成功       |
-| **面板（GUI）**             | solid-gpui 原生窗口：首页、服务器列表/实例/实时日志/玩家列表/控制面板、配置档案与启动设置、模式与地图、公告、主机配置、体检、封禁名单、启动引导               |
-| **配置档案（profile）**     | 一组命名启动设置的快照；`state.settings` 始终是**生效值**，激活档案＝把它拷进 `settings`。启动对话框默认选 `currentProfile`（上次用的那份）                   |
-| **健康（health）**          | 引擎每次运行写 `platform/logs/server/<uuid>/{error,warning,script_warning}.log`，`latest.txt` 指向本次。`error.log` 非空即本次运行有问题                      |
-| **日志分片**                | 本工具把每次启动的输出写到 `logs/<版本>-<端口>-<时间>.log`，保留最近 N 份（`settings.logRetention`）；面板「实时日志」页可在分片间回看                        |
-| **模式（playlist / mode）** | R5F 的玩法条目，位于 `platform/playlists_r5_patch.txt`；带 `r5f_mode_*` 元数据的构成**模式目录**，按 family 分组（`1v1` / `flowstate` / `mixtape` / `apex`…） |
-| **公告表**                  | `platform/datatable/chat_announcements.csv`：轮播（rotate）与进场（welcome）文案，字段 `kind,tag,text,color,sustain,fade,wait`；改动需 changelevel 或重启     |
-| **爬虫（bot）**             | 用 `spawnbots <count>` / `sv_addbot <name> <teamid>` 造的假玩家（`uniqueid == "0"`，无地址）；**不可封禁**，只能踢                                            |
-| **cfg 同步**                | 启动前把面板设置写回 `autoexec_server.cfg` 等已存在的 cvar 行（保留注释/缩进），避免引擎 cfg **覆盖**面板值                                                   |
-| **体检（doctor）**          | 环境检查：防火墙/页面文件/Defender/自启/电源 + 本次运行健康 + 对外上报可见性                                                                                  |
+| 术语                        | 含义                                                                                                                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **版本目录**                | `r5f-dedi-<版本>/`，一个完整的服务端版本（约 4.16 GB）。同时可存在多个；`state.current` 指向当前生效者                                                                                                  |
+| **实例**                    | 一次运行中的服务端进程（`r5apex_ds.exe`），由 `state.runtime` 描述：pid、游戏端口、启动时间、日志、控制通道                                                                                             |
+| **托管控制台**              | 以 `R5F_HOSTED_CONSOLE`/`R5F_CONSOLE_PIPE`/`R5F_CONSOLE_IN`/`R5F_CONSOLE_ROLE` 环境变量启动引擎的模式；引擎的控制台输出经命名管道流出，输入经管道流入                                                   |
+| **日志守护（`__logd`）**    | 分离进程：持有引擎的输出/输入管道，把控制台输出追加到日志文件，并把控制口收到的命令写进引擎输入管道。CLI/面板退出后仍存活                                                                               |
+| **控制通道**                | `127.0.0.1:<ctlPort>` + 随机令牌（首行 `AUTH <token>`）。面板/CLI → 守护 → 引擎控制台。**等价 RCON，但不新增公网端口**                                                                                  |
+| **回执（receipt）**         | 引擎对命令的回答分类：`success`（明确动作行）/ `unknown`（`Command 'x' doesn't exist`）/ `usage`（参数用法）/ `silent`（命令存在但无输出）。静默 ≠ 成功                                                 |
+| **面板（GUI）**             | solid-gpui 原生窗口：首页、服务器列表/实例/实时日志/玩家列表、服务器配置与档案、模式与地图、公告、主机配置、体检、封禁名单、启动引导。表单一律进二级弹窗，行的动作收进 ⋯ 菜单，长解释进悬停提示或折叠区 |
+| **配置档案（profile）**     | 一组命名启动设置的快照；`state.settings` 始终是**生效值**，激活档案＝把它拷进 `settings`。启动对话框默认选 `currentProfile`（上次用的那份）                                                             |
+| **健康（health）**          | 引擎每次运行写 `platform/logs/server/<uuid>/{error,warning,script_warning}.log`，`latest.txt` 指向本次。`error.log` 非空即本次运行有问题                                                                |
+| **日志分片**                | 本工具把每次启动的输出写到 `logs/<版本>-<端口>-<时间>.log`，保留最近 N 份（`settings.logRetention`）；面板「实时日志」页可在分片间回看                                                                  |
+| **模式（playlist / mode）** | R5F 的玩法条目，位于 `platform/playlists_r5_patch.txt`；带 `r5f_mode_*` 元数据的构成**模式目录**，按 family 分组（`1v1` / `flowstate` / `mixtape` / `apex`…）                                           |
+| **公告表**                  | `platform/datatable/chat_announcements.csv`：轮播（rotate）与进场（welcome）文案，字段 `kind,tag,text,color,sustain,fade,wait`；改动需 changelevel 或重启                                               |
+| **爬虫（bot）**             | 用 `spawnbots <count>` / `sv_addbot <name> <teamid>` 造的假玩家（`uniqueid == "0"`，无地址）；**不可封禁**，只能踢                                                                                      |
+| **cfg 同步**                | 启动前把面板设置写回 `autoexec_server.cfg` 等已存在的 cvar 行（保留注释/缩进），避免引擎 cfg **覆盖**面板值                                                                                             |
+| **体检（doctor）**          | 环境检查：防火墙/页面文件/Defender/自启/电源 + 本次运行健康 + 对外上报可见性                                                                                                                            |
 
 ## 模块地图（`src/`）
 

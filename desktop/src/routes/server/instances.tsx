@@ -17,10 +17,11 @@ import {
   Card,
   Confirm,
   EmptyHint,
+  Fold,
+  IconAction,
   KeyValueList,
   Note,
   PageHeader,
-  SectionTitle,
   Stat,
   Toolbar,
   PageScroll,
@@ -65,9 +66,9 @@ function Page(): SolidChild {
         description="这台电脑上正在跑的服务器"
         actions={
           <View style={{ flexDirection: "row", gap: space.sm }}>
-            <Action
-              label="刷新"
+            <IconAction
               icon="lucide:refresh-cw"
+              label="重新读一遍进程与资源占用"
               disabled={store.busy() !== null}
               onPress={() => void store.refreshFast()}
             />
@@ -167,45 +168,39 @@ function Page(): SolidChild {
                 hint={
                   instance()!.live
                     ? `服务器 ${formatClock(instance()!.live?.at ?? "")} 回过话`
-                    : "来自启动设置，服务器没有回话"
+                    : "来自启动设置（服务器没回话）"
                 }
               />
             </View>
-            <View style={{ gap: space.xs }}>
-              <SectionTitle text="给排障看的信息" icon="lucide:clipboard-list" />
-              <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>这些是出问题时给帮忙的人看的</Text>
-            </View>
-            <KeyValueList
-              rows={[
-                { label: "进程号", value: String(instance()!.pid), mono: true },
-                { label: "版本", value: instance()!.version },
-                { label: "端口", value: `UDP ${instance()!.port}`, mono: true },
-                {
-                  label: "控制通道",
-                  value: instance()!.hosted ? `127.0.0.1:${instance()!.ctlPort ?? "—"}` : "面板没接上",
-                  tone: instance()!.hosted ? "success" : "warning",
-                  mono: instance()!.hosted,
-                },
-                {
-                  label: "监听地址",
-                  value:
-                    instance()!.endpoints.length > 0
-                      ? instance()!.endpoints.join(" ")
-                      : "还没读出来（服务器可能还没准备好）",
-                  mono: instance()!.endpoints.length > 0,
-                },
-                {
-                  label: "日志",
-                  value: instance()!.logFile ? "面板已接上，在实时日志页能看" : "面板没接上，这次运行不写日志",
-                },
-              ]}
-            />
+            <Fold label="排障信息（进程号、端口、监听地址）">
+              <KeyValueList
+                rows={[
+                  { label: "进程号", value: String(instance()!.pid), mono: true },
+                  { label: "版本", value: instance()!.version },
+                  { label: "端口", value: `UDP ${instance()!.port}`, mono: true },
+                  {
+                    label: "面板指令",
+                    value: instance()!.hosted ? "能发" : "发不出去（不是面板启动的）",
+                    tone: instance()!.hosted ? "success" : "warning",
+                  },
+                  {
+                    label: "监听地址",
+                    value: instance()!.endpoints.length > 0 ? instance()!.endpoints.join(" ") : "还没读出来",
+                    mono: instance()!.endpoints.length > 0,
+                  },
+                  {
+                    label: "日志",
+                    value: instance()!.logFile ? "面板已接上" : "没接上，这次运行不写日志",
+                  },
+                ]}
+              />
+            </Fold>
           </View>
         </Card>
       ) : (
         <Note
           tone="warning"
-          text={`服务器已经停止：面板里还留着上一次运行的记录（${instance()!.version}，启动于 ${formatRelative(instance()!.startedAt)}），那些数字都是旧的。清掉记录再重新启动，才是干净的状态。`}
+          text={`服务器已经停止：面板里还留着上一次运行的记录（${instance()!.version}），那些数字是旧的。`}
           action={
             <View style={{ flexDirection: "row", gap: space.sm }}>
               <Action label="清除记录" icon="lucide:trash-2" compact onPress={() => void store.refreshState()} />

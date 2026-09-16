@@ -465,13 +465,13 @@ export type Capability = {
 /** Checklist order; the router walks the returned array in this order. */
 const CAPABILITY_ORDER: CapabilityId[] = ["firewall", "pagefile", "defender", "task", "power"];
 
-/** Checklist wording; the port only shows up in the firewall rule name. */
-const CAPABILITY_LABELS: Record<CapabilityId, (port: number) => string> = {
-  firewall: (port) => `Windows 防火墙放行 UDP ${port}`,
-  pagefile: () => "页面文件固定大小",
-  defender: () => "Defender 排除服务器目录",
-  task: () => "开机自启（登录时启动）",
-  power: () => "电源计划设为高性能",
+/** Checklist wording. Panel-only: values (port, MB, rule names) live in `detail`. */
+const CAPABILITY_LABELS: Record<CapabilityId, string> = {
+  firewall: "放行游戏端口",
+  pagefile: "固定页面文件大小",
+  defender: "排除杀毒软件扫描目录",
+  task: "开机自启",
+  power: "高性能电源计划",
 };
 
 /** 主机配置页的清单：每项都来自真实探测（开发模式下来自模拟状态文件），勾选状态即“当前是否已生效”。 */
@@ -481,7 +481,7 @@ export async function collectCapabilities(state: State): Promise<Capability[]> {
   if (!facts) {
     return CAPABILITY_ORDER.map((id) => ({
       id,
-      label: CAPABILITY_LABELS[id](port),
+      label: CAPABILITY_LABELS[id],
       enabled: false,
       detail: "探测失败",
     }));
@@ -495,31 +495,31 @@ export async function collectCapabilities(state: State): Promise<Capability[]> {
   const caps: Capability[] = [
     {
       id: "firewall",
-      label: CAPABILITY_LABELS.firewall(port),
+      label: CAPABILITY_LABELS.firewall,
       enabled: facts.firewallMissing.length === 0,
       detail: facts.firewallMissing.length === 0 ? `已放行 UDP ${port}` : `未放行 UDP ${port}`,
     },
     {
       id: "pagefile",
-      label: CAPABILITY_LABELS.pagefile(port),
+      label: CAPABILITY_LABELS.pagefile,
       enabled: facts.pageInitMB > 0,
       detail: `${pfDetail}（8 GB 内存建议 8192/16384）`,
     },
     {
       id: "defender",
-      label: CAPABILITY_LABELS.defender(port),
+      label: CAPABILITY_LABELS.defender,
       enabled: facts.defenderExcluded,
       detail: facts.defenderExcluded ? "已排除安装根目录" : facts.defenderDetail,
     },
     {
       id: "task",
-      label: CAPABILITY_LABELS.task(port),
+      label: CAPABILITY_LABELS.task,
       enabled: facts.taskState.length > 0,
       detail: facts.taskState.length > 0 ? `已配置${triggerLabel(facts.taskTrigger)}` : "未配置",
     },
     {
       id: "power",
-      label: CAPABILITY_LABELS.power(port),
+      label: CAPABILITY_LABELS.power,
       enabled: facts.powerHighPerformance,
       detail: facts.powerHighPerformance ? "已是高性能" : "当前非高性能",
     },

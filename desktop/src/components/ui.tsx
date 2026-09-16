@@ -21,7 +21,7 @@
  * 是设计选择，不是绕开故障。
  */
 import { Icon, Pressable, Text, View, type IconName, type SolidChild } from "@solid-gpui/core";
-import { Dialog, Scrollable, Separator, Tag } from "@solid-gpui/core/components";
+import { Collapsible, Dialog, Popover, Scrollable, Separator, Tag, Tooltip } from "@solid-gpui/core/components";
 import { createSignal } from "@solid-gpui/core/runtime";
 import { font, fontSize, ON_TONE, palette, radius, space } from "../lib/theme";
 
@@ -413,6 +413,189 @@ export function Toolbar(props: { children: SolidChild; gap?: number }): SolidChi
     <View style={{ flexDirection: "row", alignItems: "center", gap: props.gap ?? space.sm, flexWrap: "wrap" }}>
       {props.children}
     </View>
+  );
+}
+
+/**
+ * 图标按钮：只有图标，名字同时给无障碍与悬停提示。
+ *
+ * 表格行里的一排动作改用它 —— 每行重复三遍「踢 / 封禁 / 解封」这种字，只会把表挤满，
+ * 图标 + 悬停提示能省下大半个操作列。
+ */
+export function IconAction(props: {
+  icon: IconName;
+  label: string;
+  /** 作为 Popover 触发器时由父级接管点击，这里可以不传。 */
+  onPress?: () => void;
+  tone?: Tone;
+  variant?: ActionVariant;
+  disabled?: boolean;
+}): SolidChild {
+  return (
+    <Action
+      icon={props.icon}
+      tone={props.tone}
+      variant={props.variant ?? "ghost"}
+      compact
+      disabled={props.disabled}
+      tooltip={props.label}
+      onPress={() => props.onPress?.()}
+    />
+  );
+}
+
+export type RowMenuItem = {
+  id: string;
+  label: string;
+  icon?: IconName;
+  tone?: Tone;
+  /** 禁用时给原因：工具提示里说清楚为什么不能点 */
+  hint?: string;
+  disabled?: boolean;
+};
+
+/**
+ * 行内动作菜单：一行只留一个 ⋯，动作弹在它下面。
+ *
+ * 为什么不用原生 `DropdownMenu`：它的按钮名只能来自可见 `label`，做不出"只有图标"的样子，
+ * 而行的操作列放文字会把表格挤变形。这里的触发器是普通 `Action`（名字进无障碍树 + 悬停提示），
+ * 菜单内容由我们用同一套配色渲染。
+ */
+export function RowMenu(props: {
+  label: string;
+  items: RowMenuItem[];
+  onSelect: (id: string) => void;
+  disabled?: boolean;
+}): SolidChild {
+  return (
+    <Popover slots={{ trigger: <IconAction icon="lucide:ellipsis" label={props.label} disabled={props.disabled} /> }}>
+      <View style={{ flexDirection: "column", gap: 2, padding: space.xs, minWidth: 172 }}>
+        {props.items.map((item) => (
+          <Action
+            label={item.label}
+            icon={item.icon}
+            tone={item.tone}
+            variant="ghost"
+            compact
+            disabled={item.disabled}
+            tooltip={item.hint}
+            onPress={() => props.onSelect(item.id)}
+          />
+        ))}
+      </View>
+    </Popover>
+  );
+}
+
+/**
+ * 悬停提示：长说明、机制解释、边界条件的唯一去处。
+ *
+ * 面板过去把"为什么这样"写进正文段落 —— 那属于代码注释与手册，读者只在追问时才需要。
+ */
+export function Help(props: { text: string; placement?: "top" | "bottom" | "left" | "right" }): SolidChild {
+  return (
+    <Tooltip
+      text={props.text}
+      placement={props.placement}
+      slots={{ trigger: <Icon name="lucide:info" size={13} color={palette.textDim} /> }}
+    />
+  );
+}
+
+/**
+ * 折叠区：技术细节（排障信息、引擎原文、字段取值规则）默认收起，点标题才展开。
+ * 默认收起是刻意的 —— 默认展开等于把正文又塞回去了。
+ */
+export function Fold(props: { label: string; icon?: IconName; children: SolidChild }): SolidChild {
+  const [open, setOpen] = createSignal(false);
+  return (
+    <Collapsible
+      open={open()}
+      slots={{
+        // 触发器自己管开关：Collapsible 是受控的，不点它就只有展开状态没有动作。
+        trigger: (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={props.label}
+            focusable
+            onPress={() => setOpen((value) => !value)}
+            onKeyDown={(event) => {
+              if (event.action === "down" && (event.key === "enter" || event.key === "space")) {
+                setOpen((value) => !value);
+              }
+            }}
+            style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}
+          >
+            <Icon name={open() ? "lucide:chevron-down" : "lucide:chevron-right"} size={13} color={palette.textMuted} />
+            {props.icon ? <Icon name={props.icon} size={13} color={palette.textMuted} /> : null}
+            <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>{props.label}</Text>
+          </Pressable>
+        ),
+      }}
+    >
+      <View style={{ paddingTop: space.sm, gap: space.sm, minWidth: 0 }}>{props.children}</View>
+    </Collapsible>
+  );
+}
+
+/** 表单一行：标签（可带悬停说明）+ 控件。弹窗里的字段统一用它，免得每处自己排版。 */
+export function FormRow(props: { label: string; help?: string; children: SolidChild }): SolidChild {
+  return (
+    <View style={{ flexDirection: "column", gap: space.xs, minWidth: 0 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
+        <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>{props.label}</Text>
+        {props.help ? <Help text={props.help} /> : null}
+      </View>
+      {props.children}
+    </View>
+  );
+}
+
+/**
+ * 表单弹窗：所有"点一下展开的表单"统一走它。
+ *
+ * 三个约定：
+ *  1. `closeOnOk: false` —— 提交失败（校验不过、引擎拒绝）时弹窗留在原地，用户不用重填；
+ *  2. `problem` 只显示最后一条校验/回执结论，不叠历史；
+ *  3. 参数用 `FormRow` 排，提交按钮就是弹窗自己的确认键。
+ */
+export function FormDialog(props: {
+  open: boolean;
+  title: string;
+  okText: string;
+  okVariant?: "primary" | "danger" | "success";
+  width?: number;
+  problem?: string | null;
+  busy?: boolean;
+  onClose: () => void;
+  onOk: () => void;
+  children: SolidChild;
+}): SolidChild {
+  return (
+    <Dialog
+      open={props.open}
+      title={props.title}
+      width={props.width ?? 460}
+      buttons={{
+        okText: props.busy ? "处理中…" : props.okText,
+        cancelText: "取消",
+        okVariant: props.okVariant ?? "primary",
+        showCancel: true,
+        closeOnOk: false,
+      }}
+      onOpenChange={(event) => {
+        if (!event.open) props.onClose();
+      }}
+      onAction={(action) => {
+        if (action.kind === "ok") props.onOk();
+        else props.onClose();
+      }}
+    >
+      <View style={{ gap: space.md, minWidth: 0 }}>
+        {props.children}
+        {props.problem ? <Note tone="danger" text={props.problem} /> : null}
+      </View>
+    </Dialog>
   );
 }
 

@@ -156,7 +156,7 @@ export const SETTINGS_FIELDS: FieldDef[] = [
     engineName: "+launchplaylist",
     hint: "要跑的玩法。清单来自服务端自带的模式目录，按家族分组（1v1 在最前）；留空表示启动后由玩家选择。",
     spec: "从模式清单选择，或手动输入模式 id",
-    scope: "重启服务器后生效；运行中可在控制面板立即切换",
+    scope: "重启服务器后生效；运行中可在「模式与地图」立即切换",
     display: (s) => (s.playlist.length === 0 ? "(空 = 由玩家选择)" : s.playlist),
     defaultText: () => "fs_1v1",
     defaultValue: "fs_1v1",

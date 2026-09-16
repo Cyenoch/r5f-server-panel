@@ -3,17 +3,37 @@ import { MANUAL_OPTION, SETTINGS_FIELDS, type FieldDef } from "@server/settings-
 /**
  * 服务器配置：左边是命名配置档案，右边是逐项启动设置。
  *
- * 右侧表单**必须**遍历 `@server/settings-fields` 的声明表渲染 —— 那份表是 CLI / 面板
- * 共用的唯一来源，页面手写字段清单会立刻与引擎参数漂移。
+ * 版式约定（UI 重做后）：
+ *  1. 设置列表是**只读清单**：一行 = 标签 + 当前值，点整行进弹窗改。
+ *     过去每项常驻「说明 / 允许值 / 生效时机 / 编辑器 / 保存 / 恢复默认」六件套，
+ *     14 项叠起来就是 14 块表单和 42 个按钮 —— 现在这些只出现在弹窗里。
+ *  2. 档案的新建、覆盖、删除都是弹窗/确认框，行内只留 ⋯ 菜单。
+ *  3. 右侧表单**必须**遍历 `@server/settings-fields` 的声明表渲染 —— 那份表是 CLI / 面板
+ *     共用的唯一来源，页面手写字段清单会立刻与引擎参数漂移。
  *
- * 布局：GPUI 不是 CSS。页面根是列容器（`overflow: scroll` 让超出视口的长表单可滚，
- * 外壳的内容区不做滚动），两栏用 `flexDirection: "row"` + 左侧固定 320 + 右侧 `flexGrow: 1`。
+ * 布局：GPUI 不是 CSS。页面根是列容器，两栏用 `flexDirection: "row"` +
+ * 左侧固定 320 + 右侧 `flexGrow: 1`；滚动由 `PageScroll` 接管。
  */
-import { Pressable, Text, View, type SolidChild } from "@solid-gpui/core";
+import { Icon, Pressable, Text, View, type SolidChild } from "@solid-gpui/core";
 import { Input, Select } from "@solid-gpui/core/components";
 import { createEffect, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Action, Card, Chip, Confirm, EmptyHint, Note, PageHeader, PageScroll } from "../../components/ui";
+import {
+  Action,
+  Card,
+  Chip,
+  Confirm,
+  EmptyHint,
+  FormDialog,
+  FormRow,
+  Help,
+  IconAction,
+  Note,
+  PageHeader,
+  RowMenu,
+  PageScroll,
+  type RowMenuItem,
+} from "../../components/ui";
 import { formatRelative } from "../../lib/format";
 import { session } from "../../lib/session";
 import { font, fontSize, palette, radius, space } from "../../lib/theme";
@@ -28,27 +48,35 @@ function keyOfValue(value: string): string {
   return value.length === 0 ? EMPTY_KEY : value;
 }
 
-/** 一个设置项：当前值、说明、允许值/生效时机，加一个改值的编辑器。 */
-function FieldRow(props: { field: FieldDef }): SolidChild {
+/**
+ * 编辑一个设置项的弹窗：当前值、说明、允许值、生效时机、编辑器与「恢复默认」都在这里。
+ *
+ * 弹窗是同一个组件实例（`field` 从空变成某一项），所以换项时必须把草稿丢掉，
+ * 否则第二项会带着第一项没保存的输入打开。
+ */
+function SettingDialog(props: { field: FieldDef | null; onClose: () => void }): SolidChild {
   const store = session();
   const [draft, setDraft] = createSignal<string | null>(null);
   const [manual, setManual] = createSignal(false);
+  const [problem, setProblem] = createSignal<string | null>(null);
 
-  /** 输入框里显示什么：用户改过就用草稿，否则用引擎设置里的当前值。 */
-  const text = (): string => draft() ?? props.field.editText(store.settings());
-
-  // 这一项的**已存值**变了（切档案、恢复默认、别处改的）就把草稿丢掉，输入框回到真实值；
-  // 只是别的设置项被保存时不动草稿，免得顺手抹掉用户还没保存的输入。
-  createEffect<string, string | undefined>((previous) => {
-    const committed = props.field.editText(store.settings());
-    if (previous !== undefined && previous !== committed) setDraft(null);
-    return committed;
+  createEffect<string | undefined, undefined>((previous) => {
+    const id = props.field?.id;
+    if (previous !== undefined && previous !== id) {
+      setDraft(null);
+      setManual(false);
+      setProblem(null);
+    }
+    return id;
   }, undefined);
 
-  const options = () =>
-    props.field.options ? props.field.options({ catalog: store.catalog(), settings: store.settings() }) : [];
+  /** 输入框里显示什么：用户改过就用草稿，否则用当前值。 */
+  const text = (): string => draft() ?? (props.field ? props.field.editText(store.settings()) : "");
 
-  /** 选择项：key 去重（原生要求分组/条目 key 非空且唯一，而模式/地图清单可能重复声明），空值换成哨兵 key。 */
+  const options = () =>
+    props.field?.options ? props.field.options({ catalog: store.catalog(), settings: store.settings() }) : [];
+
+  /** 选择项：key 去重（原生要求分组/条目 key 非空且唯一），空值换成哨兵 key。 */
   const items = (): { key: string; label: string; description: string | undefined }[] => {
     const seen = new Set<string>();
     const list: { key: string; label: string; description: string | undefined }[] = [];
@@ -61,20 +89,15 @@ function FieldRow(props: { field: FieldDef }): SolidChild {
     return list;
   };
 
-  const warning = (): SolidChild => {
-    const message = props.field.warn ? props.field.warn(store.settings()) : null;
-    return message ? <Note tone="warning" text={message} /> : null;
-  };
-
   const editor = (): SolidChild => {
-    if (props.field.options !== undefined && !manual()) {
+    const field = props.field;
+    if (!field) return <View />;
+    if (field.options !== undefined && !manual()) {
       // 当前值原样交给原生 `Select`，**不**因为"值不在清单里"就撤掉 `value`：清单是异步读来的、
-      // 值还可能是手填的，两者对不上是常态。原生层把这种受控值保留为"未解析"（不选中、不显示），
-      // 既不拒绝整个提交，也不会因为清单晚到而抹掉应用状态（上游 docs/gpui-components.md
-      // 的 "Asynchronous choice catalogs"）。
+      // 值还可能是手填的，两者对不上是常态。原生层把这种受控值保留为"未解析"（不选中、不显示）。
       return (
         <Select
-          items={[{ key: props.field.id, items: items() }]}
+          items={[{ key: field.id, items: items() }]}
           value={keyOfValue(text())}
           placeholder="当前值不在清单里"
           size="small"
@@ -95,95 +118,155 @@ function FieldRow(props: { field: FieldDef }): SolidChild {
     return (
       <Input
         value={text()}
-        placeholder={props.field.spec}
+        placeholder={field.spec}
         size="small"
-        masked={props.field.kind === "password"}
-        maskToggle={props.field.kind === "password"}
+        masked={field.kind === "password"}
+        maskToggle={field.kind === "password"}
         onChange={(change) => setDraft(change.value)}
       />
     );
   };
 
   async function save(): Promise<void> {
-    if (await store.saveSettings([{ id: props.field.id, raw: text() }])) setDraft(null);
+    const field = props.field;
+    if (!field) return;
+    if (await store.saveSettings([{ id: field.id, raw: text() }])) props.onClose();
+    else setProblem("这项没保存成功，看看底部的动作记录写了什么。");
   }
 
+  const warning = () => {
+    const message = props.field?.warn ? props.field.warn(store.settings()) : null;
+    return message ? <Note tone="warning" text={message} /> : null;
+  };
+
   return (
-    <View
-      style={{
-        borderWidth: 1,
-        borderColor: palette.borderSoft,
-        borderRadius: radius.lg,
-        padding: space.md,
-        gap: space.sm,
-        minWidth: 0,
-      }}
+    <FormDialog
+      open={props.field !== null}
+      title={props.field?.label ?? ""}
+      okText="保存"
+      problem={problem()}
+      width={520}
+      onClose={props.onClose}
+      onOk={() => void save()}
     >
-      <View style={{ flexDirection: "row", alignItems: "baseline", gap: space.sm, minWidth: 0 }}>
-        <Text style={{ fontSize: fontSize.lg, fontWeight: "semibold", color: palette.text }}>{props.field.label}</Text>
-        <Text
-          style={{
-            width: 0,
-            flexGrow: 1,
-            minWidth: 0,
-            fontSize: fontSize.md,
-            color: palette.primary,
-            fontFamily: font.mono,
-          }}
-        >
-          {props.field.display(store.settings())}
-        </Text>
-      </View>
-      <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>{props.field.hint}</Text>
-      <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>
-        {`允许值：${props.field.spec}　|　改了什么时候生效：${props.field.scope}`}
-      </Text>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minWidth: 0 }}>
-        <View style={{ width: 0, flexGrow: 1, minWidth: 220 }}>{editor()}</View>
-        <Action
-          label="保存"
-          icon="lucide:check"
-          tone="info"
-          variant="solid"
-          compact
-          disabled={text() === props.field.editText(store.settings())}
-          onPress={() => void save()}
-        />
-        <Action
-          label="恢复默认"
-          icon="lucide:refresh-cw"
-          compact
-          tooltip={`默认值：${props.field.defaultText(store.settings())}`}
-          onPress={() => {
-            setDraft(null);
-            void store.resetSetting(props.field.id);
-          }}
-        />
-        {props.field.options !== undefined && manual() ? (
-          <Action
-            label="用清单选择"
-            icon="lucide:list"
-            variant="ghost"
-            compact
-            onPress={() => {
-              setManual(false);
-              setDraft(null);
-            }}
-          />
-        ) : null}
-      </View>
-      {warning()}
-    </View>
+      {props.field ? (
+        <View style={{ flexDirection: "column", gap: space.md, minWidth: 0 }}>
+          <View style={{ flexDirection: "row", alignItems: "baseline", gap: space.sm, minWidth: 0 }}>
+            <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>当前值</Text>
+            <Text
+              style={{
+                width: 0,
+                flexGrow: 1,
+                minWidth: 0,
+                fontSize: fontSize.md,
+                color: palette.primary,
+                fontFamily: font.mono,
+              }}
+            >
+              {props.field.display(store.settings())}
+            </Text>
+          </View>
+          <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>{props.field.hint}</Text>
+          <FormRow label="改成">
+            <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minWidth: 0 }}>
+              <View style={{ width: 0, flexGrow: 1, minWidth: 220 }}>{editor()}</View>
+              {props.field.options !== undefined && manual() ? (
+                <Action
+                  label="用清单选择"
+                  icon="lucide:list"
+                  variant="ghost"
+                  compact
+                  onPress={() => {
+                    setManual(false);
+                    setDraft(null);
+                  }}
+                />
+              ) : null}
+            </View>
+          </FormRow>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+            <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>
+              {`允许值：${props.field.spec}　|　${props.field.scope}`}
+            </Text>
+            <View style={{ flexGrow: 1, minWidth: 0 }} />
+            <Action
+              label="恢复默认"
+              icon="lucide:refresh-cw"
+              variant="ghost"
+              compact
+              tooltip={`默认值：${props.field.defaultText(store.settings())}`}
+              onPress={() => {
+                void store.resetSetting(props.field!.id);
+                props.onClose();
+              }}
+            />
+          </View>
+          {warning()}
+        </View>
+      ) : null}
+    </FormDialog>
   );
 }
 
-/** 档案一行：点主体即启用；覆盖 / 删除各自走确认框。 */
+/** 一个设置项一行：标签 + 当前值，点整行进弹窗（悬停整行提亮，让人看得出可以点）。 */
+function SettingRow(props: { field: FieldDef; onOpen: (field: FieldDef) => void }): SolidChild {
+  const store = session();
+  const [hover, setHover] = createSignal(false);
+  return (
+    <Pressable
+      tooltip="点开修改"
+      accessibilityRole="button"
+      accessibilityLabel={`${props.field.label}：${props.field.display(store.settings())}`}
+      onPress={() => props.onOpen(props.field)}
+      onHoverChange={(value: boolean) => setHover(value)}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: space.md,
+        paddingTop: space.sm,
+        paddingBottom: space.sm,
+        paddingLeft: space.sm,
+        paddingRight: space.sm,
+        borderRadius: radius.md,
+        backgroundColor: hover() ? palette.panelHover : "#00000000",
+        minWidth: 0,
+      }}
+    >
+      <Text style={{ width: 132, flexShrink: 0, fontSize: fontSize.md, color: palette.text }}>{props.field.label}</Text>
+      <Text
+        style={{
+          flexGrow: 1,
+          minWidth: 0,
+          fontSize: fontSize.md,
+          color: palette.textMuted,
+          fontFamily: font.mono,
+        }}
+      >
+        {props.field.display(store.settings())}
+      </Text>
+      <Icon name="lucide:chevron-right" size={14} color={palette.textDim} />
+    </Pressable>
+  );
+}
+
+/** 档案一行：点主体即启用；覆盖 / 删除走 ⋯ 菜单 + 确认框。 */
 function ProfileRow(props: {
   row: ProfileRow;
   onOverwrite: (name: string) => void;
   onDelete: (name: string) => void;
 }): SolidChild {
   const store = session();
+  const items = (): RowMenuItem[] => [
+    {
+      id: "activate",
+      label: "启用这份档案",
+      icon: "lucide:check",
+      disabled: props.row.active,
+      hint: props.row.active ? "已经在用这一份" : undefined,
+    },
+    { id: "overwrite", label: "用当前设置覆盖", icon: "lucide:download" },
+    { id: "delete", label: "删除…", icon: "lucide:trash-2", tone: "danger" },
+  ];
   return (
     <View
       style={{
@@ -200,60 +283,63 @@ function ProfileRow(props: {
     >
       <Pressable
         tooltip="把这套设置设为当前生效"
+        accessibilityRole="button"
+        accessibilityLabel={`启用配置档案 ${props.row.name}`}
         onPress={() => void store.activateProfile(props.row.name)}
         style={{ flexGrow: 1, minWidth: 0, flexDirection: "column", gap: 2 }}
       >
         <Text style={{ fontSize: fontSize.md, fontWeight: "semibold", color: palette.text }}>{props.row.name}</Text>
-        <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>{props.row.summary}</Text>
         <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>
-          {`更新于 ${formatRelative(props.row.updatedAt)}`}
+          {`${props.row.summary}　·　${formatRelative(props.row.updatedAt)}`}
         </Text>
       </Pressable>
       {props.row.active ? <Chip tone="success" label="已生效" icon="lucide:check" /> : null}
-      <Action
-        label="覆盖"
-        variant="ghost"
-        compact
-        tooltip="用当前设置覆盖这个档案"
-        onPress={() => props.onOverwrite(props.row.name)}
+      <RowMenu
+        label={`档案 ${props.row.name} 的操作`}
+        items={items()}
+        onSelect={(id) => {
+          if (id === "activate") void store.activateProfile(props.row.name);
+          if (id === "overwrite") props.onOverwrite(props.row.name);
+          if (id === "delete") props.onDelete(props.row.name);
+        }}
       />
-      <Action label="删除" tone="danger" variant="ghost" compact onPress={() => props.onDelete(props.row.name)} />
     </View>
   );
 }
 
 function Page(): SolidChild {
   const store = session();
+  const [editing, setEditing] = createSignal<FieldDef | null>(null);
+  const [createOpen, setCreateOpen] = createSignal(false);
   const [draftName, setDraftName] = createSignal("");
+  const [problem, setProblem] = createSignal<string | null>(null);
   const [overwriteTarget, setOverwriteTarget] = createSignal<string | null>(null);
   const [deleteTarget, setDeleteTarget] = createSignal<string | null>(null);
 
   const profiles = () => store.profiles();
   const currentName = () => profiles().find((row) => row.active)?.name ?? "—";
-  const catalogLoading = () => store.catalog().modes.length === 0 && store.catalog().playlists.length === 0;
 
   async function createProfile(): Promise<void> {
     const name = draftName().trim();
-    if (name.length === 0) return;
-    if (await store.writeProfile("create", name)) setDraftName("");
+    if (name.length === 0) {
+      setProblem("先给档案起个名字。");
+      return;
+    }
+    if (await store.writeProfile("create", name)) {
+      setDraftName("");
+      setProblem(null);
+      setCreateOpen(false);
+    } else {
+      setProblem("新建失败，看看底部的动作记录写了什么。");
+    }
   }
 
   return (
-    <PageScroll
-      style={{
-        flexGrow: 1,
-        minHeight: 0,
-        minWidth: 0,
-        flexDirection: "column",
-        gap: space.lg,
-        padding: space.xl,
-        overflow: "scroll",
-      }}
-    >
+    <PageScroll style={{ gap: space.lg, padding: space.xl }}>
       <PageHeader
         title="服务器配置"
-        description="左边管配置档案——一套完整的启动设置，开服时选一套就行；右边是这套设置里每一项的值。"
         icon="lucide:settings"
+        description="启动设置与配置档案；这里填的值在启动时写回服务器，以面板为准。"
       />
 
       <View style={{ flexDirection: "row", gap: space.lg, minHeight: 0, minWidth: 0, alignItems: "flex-start" }}>
@@ -263,13 +349,23 @@ function Page(): SolidChild {
             icon="lucide:layers"
             tone="accent"
             subtitle={`${profiles().length} 个 · 已生效：${currentName()}`}
+            actions={
+              <IconAction
+                icon="lucide:plus"
+                label="新建档案（照抄当前设置）"
+                onPress={() => {
+                  setProblem(null);
+                  setCreateOpen(true);
+                }}
+              />
+            }
           >
             {profiles().length === 0 ? (
               <EmptyHint
                 compact
                 icon="lucide:layers"
                 title="还没有配置档案"
-                description="在下面输入名字新建一份（会照抄当前设置）。"
+                description="用右上角的 + 新建一份（照抄当前设置）。"
               />
             ) : (
               <View style={{ gap: space.sm }}>
@@ -282,55 +378,55 @@ function Page(): SolidChild {
                 ))}
               </View>
             )}
-            <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minWidth: 0 }}>
-              <View style={{ flexGrow: 1, minWidth: 0 }}>
-                <Input
-                  value={draftName()}
-                  placeholder="新档案名"
-                  size="small"
-                  onChange={(change) => setDraftName(change.value)}
-                />
-              </View>
-              <Action
-                label="新建"
-                icon="lucide:plus"
-                compact
-                disabled={draftName().trim().length === 0}
-                onPress={() => void createProfile()}
-              />
-            </View>
-            <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>
-              配置档案＝一套完整的启动设置，开服时选一套就行。点档案主体即启用（把档案里的值复制进当前设置）；“覆盖”把当前设置写回档案。
-            </Text>
           </Card>
+
+          <ProfileHint />
         </View>
 
-        <View style={{ width: 0, flexGrow: 1, minWidth: 0, gap: space.lg }}>
+        <View style={{ flexGrow: 1, minWidth: 0 }}>
           <Card
             title="启动设置"
             icon="lucide:sliders-horizontal"
-            subtitle={`${SETTINGS_FIELDS.length} 项 · 存在本机，不上传`}
+            tone="info"
+            subtitle="点任意一项改值；改完的表在下次启动时生效"
           >
-            <Note text="这里填的值优先：启动服务器时会把它们写进服务器配置文件，同一个配置项以面板为准；改完重启服务器生效。" />
-            {catalogLoading() ? (
-              <Note
-                tone="info"
-                text="还没读出玩法模式与地图清单：地图、模式两项眼下只有「(空)」和「手动输入…」可选，等清单出来再选更省事。"
-              />
-            ) : null}
-            <View style={{ gap: space.md }}>
-              {SETTINGS_FIELDS.map((field) => (
-                <FieldRow field={field} />
+            <View style={{ gap: 2 }}>
+              {SETTINGS_FIELDS.map((field, index) => (
+                <View style={{ gap: 2 }}>
+                  {index > 0 ? <View style={{ height: 1, backgroundColor: palette.borderSoft }} /> : null}
+                  <SettingRow field={field} onOpen={setEditing} />
+                </View>
               ))}
             </View>
           </Card>
         </View>
       </View>
 
+      <SettingDialog field={editing()} onClose={() => setEditing(null)} />
+
+      <FormDialog
+        open={createOpen()}
+        title="新建配置档案"
+        okText="新建"
+        problem={problem()}
+        onClose={() => setCreateOpen(false)}
+        onOk={() => void createProfile()}
+      >
+        <FormRow label="档案名" help="新档案照抄当前设置；之后改设置不会自动同步到它，除非再点「用当前设置覆盖」。">
+          <Input
+            value={draftName()}
+            placeholder="例如 1v1 夜间"
+            ariaLabel="新档案名"
+            cleanable
+            onChange={(change) => setDraftName(change.value)}
+          />
+        </FormRow>
+      </FormDialog>
+
       <Confirm
         open={overwriteTarget() !== null}
-        title="覆盖配置档案"
-        message={`用当前生效设置覆盖档案「${overwriteTarget() ?? ""}」？档案里原来的值会被替换。`}
+        title="覆盖这份档案？"
+        message={`会把当前的设置写进「${overwriteTarget() ?? ""}」，这份档案旧的值就没了。`}
         confirmLabel="覆盖"
         onConfirm={() => {
           const name = overwriteTarget();
@@ -339,13 +435,12 @@ function Page(): SolidChild {
         }}
         onCancel={() => setOverwriteTarget(null)}
       />
-
       <Confirm
         open={deleteTarget() !== null}
-        title="删除配置档案"
-        message={`删除档案「${deleteTarget() ?? ""}」？只影响这套命名设置，不会动正在跑的服务器。`}
-        confirmLabel="删除"
         danger
+        title="删除这份档案？"
+        message={`「${deleteTarget() ?? ""}」会被删掉。当前生效的设置不受影响。`}
+        confirmLabel="删除"
         onConfirm={() => {
           const name = deleteTarget();
           setDeleteTarget(null);
@@ -354,5 +449,15 @@ function Page(): SolidChild {
         onCancel={() => setDeleteTarget(null)}
       />
     </PageScroll>
+  );
+}
+
+/** 档案与设置的关系只有一句要记住的话，收在卡片下面，不占正文。 */
+function ProfileHint(): SolidChild {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs, minWidth: 0 }}>
+      <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>点档案名即启用；右边改的是当前生效的值。</Text>
+      <Help text="配置档案＝一套完整的启动设置快照。启动对话框默认选上次用的那份。" />
+    </View>
   );
 }

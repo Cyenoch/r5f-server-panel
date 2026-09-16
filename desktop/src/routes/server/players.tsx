@@ -1,14 +1,18 @@
 /**
- * 玩家列表：引擎 `status` 解析出来的在线名单 + 踢 / 封 / 解封 + 机器人。
+ * 玩家列表：引擎 `status` 解析出来的在线名单 + 踢 / 封禁 / 解封 / 机器人。
  *
- * 两件事必须如实说：
- *  1. 引擎对 `kick` / `ban` 可能**静默**（不回话）—— 静默不等于成功；回执原文由 store 落进动作记录，
- *     页面不写"已生效"。
- *  2. 机器人（`uniqueid === "0"`）没有 id64，封不了 —— 按钮直接禁用并说明原因，不给引擎去报错。
+ * 版式约定（UI 重做后）：
+ *  1. 审核动作全部走弹窗（封禁、解封、加机器人）—— 表单不再平铺在正文里；
+ *  2. 行内只留两个图标动作（踢、封禁），名字进悬停提示；
+ *  3. 边界与机制（机器人不可封禁、引擎可能静默、玩家 ID 与会话编号的区别）走 `Help`，
+ *     不写成段落。页面上只剩"现在能不能点"这一个结论。
+ *
+ * 两件必须如实说的事没变：引擎对 `kick` / `ban` 可能**静默**（回执原文进动作记录，页面不写"已生效"）；
+ * 机器人（`uniqueid === "0"`）没有 id64，封不了 —— 按钮直接禁用并在提示里说原因。
  */
 import { Text, View, type SolidChild } from "@solid-gpui/core";
 import {
-  Dialog,
+  Clipboard,
   Input,
   Select,
   Table,
@@ -21,7 +25,18 @@ import {
 } from "@solid-gpui/core/components";
 import { createMemo, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Action, Card, Chip, Confirm, EmptyHint, Note, PageHeader, Toolbar, PageScroll } from "../../components/ui";
+import {
+  Action,
+  Chip,
+  Confirm,
+  EmptyHint,
+  FormDialog,
+  FormRow,
+  IconAction,
+  Note,
+  PageHeader,
+  PageScroll,
+} from "../../components/ui";
 import { session } from "../../lib/session";
 import { font, fontSize, palette, space } from "../../lib/theme";
 
@@ -38,6 +53,11 @@ const TEAM_ITEMS: ChoiceGroup[] = [
     ],
   },
 ];
+
+/** 引擎的状态原样来自 `status`；只有实测见过的 `active` 给中文，其余照抄，不猜。 */
+function stateLabel(state: string): string {
+  return state === "active" ? "游戏中" : state;
+}
 
 /** 伸缩列显式 width: 0；省略宽度会让原生 Table 用整行宽度作为 flex 基准。 */
 function HeadCell(props: { label: string; width?: number; grow?: boolean }): SolidChild {
@@ -65,42 +85,49 @@ function TextCell(props: { value: string; width: number; mono?: boolean; tone?: 
   );
 }
 
+/** 被封禁的对象：弹窗只认这两样（会话编号用于显示，玩家 ID 才是解封的凭据）。 */
+type BanTarget = { userid: string; name: string; id64: string };
+
 function Page(): SolidChild {
   const store = session();
   const [addOpen, setAddOpen] = createSignal(false);
   const [clearOpen, setClearOpen] = createSignal(false);
+  const [unbanOpen, setUnbanOpen] = createSignal(false);
+  const [banTarget, setBanTarget] = createSignal<BanTarget | null>(null);
+
   const [count, setCount] = createSignal("1");
   const [botName, setBotName] = createSignal("");
   const [team, setTeam] = createSignal<0 | 1 | 2>(0);
-  const [banUserId, setBanUserId] = createSignal("");
-  const [banName, setBanName] = createSignal("");
   const [minutes, setMinutes] = createSignal("");
   const [reason, setReason] = createSignal("");
-  const [unban, setUnban] = createSignal("");
+  const [unbanId, setUnbanId] = createSignal("");
+  const [problem, setProblem] = createSignal<string | null>(null);
 
   const players = createMemo(() => store.players());
   const bots = createMemo(() => players().filter((player) => player.uniqueid === "0").length);
+  const busy = () => store.busy() !== null;
+  const addBusy = () => store.busy() === "添加机器人";
 
-  /** 空态里那句解释：读不到名单的原因分三种，逐个说清楚，不含糊。 */
+  /** 空态只有一句：读不到名单的原因分三种，各说各的，不铺垫。 */
   const emptyReason = (): string => {
     const instance = store.instance();
-    if (!instance || !instance.alive) return "服务器没在运行 —— 启动后才能看到谁在线。";
-    if (!instance.hosted) return "面板没接上这台服务器，读不到在线名单 —— 重启这台服务器让它由面板启动。";
-    return "现在没有人在线（机器人在服务器里也算玩家）—— 可以点 加机器人 先试试。";
+    if (!instance || !instance.alive) return "服务器没在运行。";
+    if (!instance.hosted) return "面板没接上这台服务器 —— 重启它让面板来启动。";
+    return "现在没有人在线；想看列表长什么样，先加几个机器人。";
   };
 
   /** 加机器人的前置检查：引擎的「具名 / 批量」是两条路，各自的约束在这里说破。 */
   const addIssue = (): string | null => {
     const name = botName().trim();
-    if (name.length > 0)
-      return /\s/.test(name) ? "名字不能带空格 —— 服务器按空格把名字和队伍分开，换个名字再试。" : null;
+    if (name.length > 0) return /\s/.test(name) ? "名字不能带空格（服务器按空格拆名字与队伍）。" : null;
     const size = Number.parseInt(count().trim(), 10);
-    return Number.isInteger(size) && size >= 1 ? null : "数量要填 ≥ 1 的整数 —— 填 0 个机器人没有意义，这里直接拦下。";
+    return Number.isInteger(size) && size >= 1 ? null : "数量要填 ≥ 1 的整数。";
   };
 
   const submitBots = async (): Promise<void> => {
-    // 有本地就知道不合法的输入就先拦住（弹窗里那条黄色说明举着原因），不发给引擎。
-    if (addIssue()) return;
+    const issue = addIssue();
+    setProblem(issue);
+    if (issue) return;
     // 名字与数量在引擎侧互斥（sv_addbot 一次只加一个具名机器人），所以按分支只传一条路。
     const name = botName().trim();
     if (name.length > 0) await store.addBots({ name, team: team() });
@@ -119,70 +146,78 @@ function Page(): SolidChild {
   };
 
   const submitBan = async (): Promise<void> => {
-    const target = banUserId();
-    if (target.length === 0 || banIssue()) return;
+    const target = banTarget();
+    const issue = banIssue();
+    setProblem(issue);
+    if (!target || issue) return;
     const raw = minutes().trim();
     const size = raw.length === 0 ? 0 : Number.parseInt(raw, 10);
     // 带时长/原因才走「引擎封 + 本机台账」那条路：台账里才有到期与原因（引擎不存）。
-    await store.moderate("ban", target, { minutes: size, reason: reason().trim() });
-    setBanUserId("");
+    await store.moderate("ban", target.userid, { minutes: size, reason: reason().trim() });
+    setBanTarget(null);
   };
 
   const submitUnban = async (): Promise<void> => {
-    const target = unban().trim();
+    const target = unbanId().trim();
     if (target.length === 0) {
-      store.notice("error", "解除封禁", "先填要解封的玩家 ID —— 玩家列表里那一列可以复制。");
+      setProblem("先填要解封的玩家 ID。");
       return;
     }
+    setProblem(null);
     const result = await store.moderate("unban", target);
-    if (result !== undefined && result !== "no-control") setUnban("");
+    if (result !== undefined && result !== "no-control") {
+      setUnbanId("");
+      setUnbanOpen(false);
+    }
   };
 
   return (
-    <PageScroll
-      style={{
-        flexGrow: 1,
-        minHeight: 0,
-        minWidth: 0,
-        flexDirection: "column",
-        gap: space.lg,
-        padding: space.xl,
-        // 外壳的内容区没有滚动容器：页面自己滚，超高的部分（表格 + 解封卡片）才够得着。
-        overflow: "scroll",
-      }}
-    >
+    <PageScroll style={{ gap: space.lg, padding: space.xl }}>
       <PageHeader
         title="玩家列表"
         icon="lucide:users"
-        description="现在在线的玩家和机器人；踢人、封禁、解封都在这一页。"
+        description="现在在线的玩家；踢人、封禁、解封都从这一页发出。"
+        actions={
+          <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
+            <IconAction
+              icon="lucide:refresh-cw"
+              label="刷新名单"
+              disabled={busy()}
+              onPress={() => void store.refreshFast()}
+            />
+            <Action
+              label="解封…"
+              icon="lucide:check"
+              disabled={busy()}
+              onPress={() => {
+                setProblem(null);
+                setUnbanId("");
+                setUnbanOpen(true);
+              }}
+            />
+            <Action
+              label="加机器人"
+              icon="lucide:plus"
+              tone="info"
+              variant="solid"
+              disabled={busy()}
+              onPress={() => {
+                setProblem(null);
+                setAddOpen(true);
+              }}
+            />
+            <IconAction
+              icon="lucide:minus"
+              label="清空机器人"
+              tone="danger"
+              disabled={busy() || bots() === 0}
+              onPress={() => setClearOpen(true)}
+            />
+          </View>
+        }
       />
 
-      <Toolbar>
-        <Action
-          label="刷新"
-          icon="lucide:refresh-cw"
-          onPress={() => void store.refreshFast()}
-          disabled={store.busy() !== null}
-        />
-        <Action label="加机器人" icon="lucide:plus" onPress={() => setAddOpen(true)} disabled={store.busy() !== null} />
-        <Action
-          label="清空机器人"
-          icon="lucide:minus"
-          tone="danger"
-          onPress={() => setClearOpen(true)}
-          disabled={store.busy() !== null}
-        />
-        {store.busy() ? (
-          <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>{`正在${store.busy()}…`}</Text>
-        ) : null}
-      </Toolbar>
-
-      {store.playersError() ? (
-        <Note
-          tone="danger"
-          text={`读不到在线名单：${store.playersError()}　先点 刷新 再试一次，还是不行就重启服务器。`}
-        />
-      ) : null}
+      {store.playersError() ? <Note tone="danger" text={`读不到在线名单：${store.playersError()}`} /> : null}
 
       {players().length === 0 ? (
         <EmptyHint icon="lucide:users" title="没有玩家在线" description={emptyReason()} />
@@ -192,10 +227,10 @@ function Page(): SolidChild {
             <TableRow>
               <HeadCell label="玩家" grow />
               <HeadCell label="会话编号" width={76} />
-              <HeadCell label="玩家 ID" width={176} />
-              <HeadCell label="状态" width={92} />
-              <HeadCell label="ping" width={64} />
-              <HeadCell label="操作" width={152} />
+              <HeadCell label="玩家 ID" width={208} />
+              <HeadCell label="状态" width={88} />
+              <HeadCell label="ping" width={56} />
+              <HeadCell label="操作" width={64} />
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -208,32 +243,47 @@ function Page(): SolidChild {
                   </View>
                 </TableCell>
                 <TextCell value={player.userid} width={76} mono />
-                <TextCell value={player.uniqueid === "0" ? "—" : player.uniqueid} width={176} mono />
+                <TableCell style={{ width: 208, flexShrink: 0 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs, minWidth: 0 }}>
+                    <Text
+                      style={{
+                        fontSize: fontSize.sm,
+                        color: player.uniqueid === "0" ? palette.textDim : palette.text,
+                        fontFamily: font.mono,
+                      }}
+                    >
+                      {player.uniqueid === "0" ? "—" : player.uniqueid}
+                    </Text>
+                    {/* 解封要的就是这一串：让它就地可复制，省得去别处翻。 */}
+                    {player.uniqueid === "0" ? null : (
+                      <Clipboard value={player.uniqueid} tooltip="复制玩家 ID（解封要用它）" />
+                    )}
+                  </View>
+                </TableCell>
                 <TextCell
-                  value={player.state || "—"}
-                  width={92}
+                  value={stateLabel(player.state) || "—"}
+                  width={88}
                   tone={player.state === "active" ? palette.success : palette.text}
                 />
-                <TextCell value={player.ping || "—"} width={64} />
-                <TableCell style={{ width: 152, flexShrink: 0 }}>
+                <TextCell value={player.ping || "—"} width={56} />
+                <TableCell style={{ width: 64, flexShrink: 0 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
-                    <Action
-                      label="踢"
-                      compact
+                    <IconAction
+                      icon="lucide:x"
+                      label="踢出"
+                      disabled={busy()}
                       onPress={() => void store.moderate("kick", player.userid)}
-                      disabled={store.busy() !== null}
                     />
-                    <Action
-                      label="封禁"
-                      compact
+                    <IconAction
+                      icon="lucide:square"
+                      label={player.uniqueid === "0" ? "机器人不可封禁，只能踢" : "封禁…"}
                       tone="danger"
-                      disabled={player.uniqueid === "0" || store.busy() !== null}
-                      tooltip={player.uniqueid === "0" ? "机器人不可封禁，只能踢" : undefined}
+                      disabled={player.uniqueid === "0" || busy()}
                       onPress={() => {
+                        setProblem(null);
                         setMinutes("");
                         setReason("");
-                        setBanName(player.name);
-                        setBanUserId(player.userid);
+                        setBanTarget({ userid: player.userid, name: player.name, id64: player.uniqueid });
                       }}
                     />
                   </View>
@@ -244,145 +294,109 @@ function Page(): SolidChild {
         </Table>
       )}
 
-      <Card title="解封" icon="lucide:check" subtitle="解封要玩家 ID；会话编号只是这次开服时的临时编号">
-        <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>
-          为什么玩家 ID 比会话编号靠得住：会话编号每次重启服务器都会重新排，拿它解封可能解错人；玩家 ID
-          是这个账号的固定编号，重启也不会变。 本机台账里每条封禁都记着当时的玩家 ID，去封禁名单页可以查。
-        </Text>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minWidth: 0 }}>
-          <View style={{ width: 320, flexShrink: 0 }}>
-            <Input
-              value={unban()}
-              placeholder="玩家 ID（64 位数字）"
-              ariaLabel="要解封的玩家 ID"
-              cleanable
-              onChange={(change) => setUnban(change.value)}
-            />
-          </View>
-          <Action
-            label="解封"
-            icon="lucide:check"
-            variant="solid"
-            tone="success"
-            onPress={() => void submitUnban()}
-            disabled={unban().trim().length === 0 || store.busy() !== null}
-          />
-          {unban().trim().length === 0 ? (
-            <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>先填要解封的玩家 ID。</Text>
-          ) : null}
-        </View>
-      </Card>
-
-      <Dialog
+      <FormDialog
         open={addOpen()}
         title="加机器人"
-        width={460}
-        buttons={{ okText: "添加", cancelText: "取消", okVariant: "primary", showCancel: true, closeOnOk: false }}
-        onOpenChange={(value) => {
-          if (!value.open) setAddOpen(false);
-        }}
-        onAction={(action) => {
-          if (action.kind === "ok") void submitBots();
-          else setAddOpen(false);
-        }}
+        okText="添加"
+        busy={addBusy()}
+        problem={problem()}
+        onClose={() => setAddOpen(false)}
+        onOk={() => void submitBots()}
       >
-        <View style={{ gap: space.md }}>
-          <View style={{ gap: space.xs }}>
-            <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>数量</Text>
-            <Input
-              value={count()}
-              placeholder="例如 8"
-              ariaLabel="机器人数量"
-              disabled={botName().trim().length > 0}
-              onChange={(change) => setCount(change.value)}
-            />
-          </View>
-          <View style={{ gap: space.xs }}>
-            <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>名字（可选）</Text>
-            <Input
-              value={botName()}
-              placeholder="留空则按数量批量生成"
-              ariaLabel="机器人名字"
-              cleanable
-              onChange={(change) => setBotName(change.value)}
-            />
-          </View>
-          <View style={{ gap: space.xs }}>
-            <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>队伍</Text>
-            <Select
-              accessibilityLabel="机器人队伍"
-              items={TEAM_ITEMS}
-              value={String(team())}
-              placeholder="队伍"
-              size="small"
-              onChange={(change) => {
-                const raw = change.value;
-                setTeam(raw === "1" ? 1 : raw === "2" ? 2 : 0);
-              }}
-            />
-          </View>
-          <Note
-            tone="info"
-            text="填了名字就是具名机器人：一次只加一个，队伍生效；不填名字走批量，数量生效、队伍由服务器自己分配。"
+        <FormRow label="数量" help="不填名字时按数量批量生成，队伍由服务器自己分配。">
+          <Input
+            value={count()}
+            placeholder="例如 8"
+            ariaLabel="机器人数量"
+            disabled={botName().trim().length > 0}
+            onChange={(change) => setCount(change.value)}
           />
-          {addIssue() ? <Note tone="warning" text={addIssue() ?? ""} /> : null}
-        </View>
-      </Dialog>
+        </FormRow>
+        <FormRow label="名字" help="填了名字就是具名机器人：一次只加一个，队伍按下面选。">
+          <Input
+            value={botName()}
+            placeholder="留空则按数量批量生成"
+            ariaLabel="机器人名字"
+            cleanable
+            onChange={(change) => setBotName(change.value)}
+          />
+        </FormRow>
+        <FormRow label="队伍">
+          <Select
+            accessibilityLabel="机器人队伍"
+            items={TEAM_ITEMS}
+            value={String(team())}
+            size="small"
+            onChange={(change) => {
+              const raw = change.value;
+              setTeam(raw === "1" ? 1 : raw === "2" ? 2 : 0);
+            }}
+          />
+        </FormRow>
+      </FormDialog>
 
-      <Dialog
-        open={banUserId().length > 0}
-        title="封禁玩家"
-        width={460}
-        buttons={{ okText: "封禁", cancelText: "取消", okVariant: "danger", showCancel: true, closeOnOk: false }}
-        onOpenChange={(value) => {
-          if (!value.open) setBanUserId("");
-        }}
-        onAction={(action) => {
-          if (action.kind === "ok") void submitBan();
-          else setBanUserId("");
-        }}
+      <FormDialog
+        open={banTarget() !== null}
+        title={banTarget() ? `封禁 ${banTarget()!.name || "（名字为空）"}` : "封禁"}
+        okText="封禁"
+        okVariant="danger"
+        problem={problem()}
+        onClose={() => setBanTarget(null)}
+        onOk={() => void submitBan()}
       >
-        <View style={{ gap: space.md }}>
-          <Text style={{ fontSize: fontSize.md, color: palette.text }}>
-            {`${banName() || "（名字为空）"} · 会话编号 ${banUserId()}`}
+        <View style={{ gap: space.xs, minWidth: 0 }}>
+          <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>
+            {banTarget() ? `会话编号 ${banTarget()!.userid} · 玩家 ID ${banTarget()!.id64}` : ""}
           </Text>
-          <View style={{ gap: space.xs }}>
-            <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>时长（分钟，留空 = 永久）</Text>
-            <Input
-              value={minutes()}
-              placeholder="留空 = 永久"
-              ariaLabel="封禁时长（分钟）"
-              cleanable
-              onChange={(change) => setMinutes(change.value)}
-            />
-          </View>
-          <View style={{ gap: space.xs }}>
-            <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>原因</Text>
-            <Input
-              value={reason()}
-              placeholder="写给自己看的（服务器不保存原因）"
-              ariaLabel="封禁原因"
-              cleanable
-              onChange={(change) => setReason(change.value)}
-            />
-          </View>
-          <Note
-            tone="warning"
-            text={
-              minutes().trim().length === 0
-                ? "永久封禁：只在本机台账里留一条记录（原因为证），不会自动解封。服务器对封禁可能没有回话 —— 没回话不等于成功，去玩家客户端确认。"
-                : "时长和原因只记在本机台账里：到期由日志守护代发解封；守护不在时（服务器已停、机器重启）不会执行。服务器对封禁可能没有回话 —— 没回话不等于成功。"
-            }
-          />
-          {banIssue() ? <Note tone="danger" text={banIssue() ?? ""} /> : null}
         </View>
-      </Dialog>
+        <FormRow label="时长（分钟）" help="留空 = 永久。临时封禁到期后由面板在服务器运行期间代发解封。">
+          <Input
+            value={minutes()}
+            placeholder="留空 = 永久"
+            ariaLabel="封禁时长（分钟）"
+            cleanable
+            onChange={(change) => setMinutes(change.value)}
+          />
+        </FormRow>
+        <FormRow label="原因" help="原因与到期只写在本面板的封禁记录里，服务器不保存。">
+          <Input
+            value={reason()}
+            placeholder="写给自己看"
+            ariaLabel="封禁原因"
+            cleanable
+            onChange={(change) => setReason(change.value)}
+          />
+        </FormRow>
+        <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>
+          服务器通常不回话 —— 没回话不等于封住了，让对方重连一次才算确认。
+        </Text>
+      </FormDialog>
+
+      <FormDialog
+        open={unbanOpen()}
+        title="解封"
+        okText="解封"
+        okVariant="success"
+        problem={problem()}
+        onClose={() => setUnbanOpen(false)}
+        onOk={() => void submitUnban()}
+      >
+        <FormRow label="玩家 ID" help="会话编号每次重启都会重排，解封要用固定的玩家 ID；封禁名单页也能查到。">
+          <Input
+            value={unbanId()}
+            placeholder="64 位数字"
+            ariaLabel="要解封的玩家 ID"
+            cleanable
+            onChange={(change) => setUnbanId(change.value)}
+          />
+        </FormRow>
+      </FormDialog>
 
       <Confirm
         open={clearOpen()}
         danger
         title="清空机器人"
-        message={`会把机器人全部踢掉（现在有 ${bots()} 个）。踢掉和名单更新之间有一点延迟，一次没清干净可以再来一次；真人玩家不受影响。`}
+        message={`会把 ${bots()} 个机器人全部踢掉，真人不受影响。一次没清干净可以再来一次。`}
         confirmLabel="清空"
         onConfirm={() => {
           setClearOpen(false);

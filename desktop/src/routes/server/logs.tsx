@@ -9,7 +9,7 @@ import { Text, TextInput, View, type SolidChild } from "@solid-gpui/core";
 import { Select } from "@solid-gpui/core/components";
 import { createMemo, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Action, Note, PageHeader, Toolbar } from "../../components/ui";
+import { Action, IconAction, Note, PageHeader, Toolbar } from "../../components/ui";
 import { formatBytes, formatRelative } from "../../lib/format";
 import { session, type NoticeKind } from "../../lib/session";
 import { font, fontSize, logTone, palette, radius, space } from "../../lib/theme";
@@ -81,11 +81,7 @@ function Page(): SolidChild {
       <PageHeader
         title="实时日志"
         icon="lucide:list"
-        description={
-          store.logPath() === null
-            ? "这次运行还没有输出内容 —— 启动服务器后这里会实时刷新"
-            : "服务器正在输出的内容，逐行显示在这里"
-        }
+        description="服务器输出的内容；下面可以直接敲指令，回执跟着显示。"
       />
 
       <Toolbar>
@@ -95,16 +91,17 @@ function Page(): SolidChild {
           tone={store.following() ? "info" : "neutral"}
           variant={store.following() ? "solid" : "outline"}
           onPress={toggleFollow}
+          tooltip={store.following() ? "暂停刷新（画面停在当前）" : "继续跟随最新输出"}
         />
-        <Action
-          label="清屏"
+        <IconAction
           icon="lucide:trash-2"
+          label="清屏（只清画面，不动日志文件）"
           onPress={() => {
             store.clearLog();
             setFrozen([]);
           }}
         />
-        <Action label="刷新" icon="lucide:refresh-cw" onPress={() => store.pollLog()} />
+        <IconAction icon="lucide:refresh-cw" label="立刻读一次新增内容" onPress={() => store.pollLog()} />
         <Select
           items={shardChoices()}
           value={store.logPath() ?? undefined}
@@ -123,14 +120,11 @@ function Page(): SolidChild {
 
       {/* 两边都可能没有日志文件：先判空再比，否则会误报“在看历史分片”。 */}
       {store.logPath() !== null && instance()?.logFile !== store.logPath() ? (
-        <Note text="正在看历史日志，不是这次运行的内容 —— 在上面的下拉里选 本次运行 回到现在。" />
+        <Note text="在看历史日志（不是这次运行）：上面的下拉里选回本次运行。" />
       ) : null}
 
       {errorBytes() > 0 ? (
-        <Note
-          tone="danger"
-          text={`本次运行的错误记录里有内容（${formatBytes(errorBytes())}），去 运维 → 体检 看是什么问题。`}
-        />
+        <Note tone="danger" text={`本次运行记录到了错误（${formatBytes(errorBytes())}）—— 去 运维 → 体检 看是什么。`} />
       ) : null}
 
       <View style={{ height: 0, flexGrow: 1, minHeight: 0, minWidth: 0, flexDirection: "column" }}>

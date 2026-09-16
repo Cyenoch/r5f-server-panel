@@ -17,6 +17,8 @@ import {
   Card,
   Chip,
   EmptyHint,
+  Fold,
+  Help,
   KeyValueList,
   Note,
   PageHeader,
@@ -27,7 +29,7 @@ import {
 } from "../../components/ui";
 import { formatBytes } from "../../lib/format";
 import { session } from "../../lib/session";
-import { fontSize, palette, radius, space } from "../../lib/theme";
+import { font, fontSize, palette, radius, space } from "../../lib/theme";
 
 export const Route = createFileRoute("/server/list")({ component: Page });
 
@@ -133,15 +135,6 @@ function Page(): SolidChild {
         }
       />
 
-      {versions().length === 0 ? (
-        <Note
-          tone="warning"
-          text="还没找到可用的服务端，列表和启动都用不了：把解压好的服务端文件夹放进面板所在目录。"
-        />
-      ) : current() === null ? (
-        <Note tone="info" text="还没选好要开哪个版本：在下面任一张卡片上点「使用」，之后就能从这里启动。" />
-      ) : null}
-
       {versions().length > 0 ? (
         <View style={{ gap: space.md }}>
           {versions().map((version) => {
@@ -153,7 +146,6 @@ function Page(): SolidChild {
                 value: version.sizeBytes >= 0 ? formatBytes(version.sizeBytes) : "还没统计（点右上「刷新」）",
               },
               ...(version.build.length > 0 ? [{ label: "版本号", value: version.build }] : []),
-              { label: "文件夹", value: version.path, mono: true },
             ];
             return (
               <Card
@@ -191,6 +183,11 @@ function Page(): SolidChild {
                     {isCurrent ? <Chip tone="info" icon="lucide:check" label="当前版本" /> : null}
                   </View>
                   <KeyValueList rows={rows} />
+                  <Fold label="文件夹位置">
+                    <Text style={{ fontSize: fontSize.sm, color: palette.textDim, fontFamily: font.mono }}>
+                      {version.path}
+                    </Text>
+                  </Fold>
                 </View>
               </Card>
             );
@@ -223,10 +220,11 @@ function Page(): SolidChild {
       >
         <View style={{ gap: space.lg }}>
           <View style={{ gap: space.sm }}>
-            <SectionTitle text="1 · 选一套配置" icon="lucide:sliders-horizontal" />
-            <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>
-              点一下就生效（这套设置会变成当前设置）；启动时点取消，也不会把它改回去。
-            </Text>
+            <SectionTitle
+              text="1 · 选一套配置"
+              icon="lucide:sliders-horizontal"
+              actions={<Help text="点一下就生效：这套设置会变成当前设置；启动时点取消也不会把它改回去。" />}
+            />
             {store.profiles().length === 0 ? (
               <Text style={{ fontSize: fontSize.md, color: palette.textDim }}>
                 还没存过配置，会直接用现在这份设置启动。
@@ -289,16 +287,12 @@ function Page(): SolidChild {
               />
             </View>
             <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>
-              留空的一项就用上面的默认值；这三项只影响这一次启动，不会写回设置。
+              留空 = 用设置里的值；这三项只影响这一次启动，不写回设置。
             </Text>
           </View>
 
           {problem().length > 0 ? <Note tone="danger" text={problem()} /> : null}
-          {store.busy() === LAUNCH_LABEL ? (
-            <Note tone="info" text="正在启动…服务器还在准备，等它把日志接上，这个对话框才会关。" />
-          ) : (
-            <Note tone="info" text="启动后面板会自动接上日志，完成后跳到实时日志页。" />
-          )}
+          {store.busy() === LAUNCH_LABEL ? <Note tone="info" text="正在启动…" /> : null}
         </View>
       </Dialog>
     </PageScroll>

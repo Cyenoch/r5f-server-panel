@@ -26,7 +26,7 @@ import { Outlet, useLocation, useNavigate } from "@solid-gpui/router";
 import { Action, Chip } from "../components/ui";
 import { formatRelative } from "../lib/format";
 import { setWindowTitle } from "../lib/host";
-import { NAV, navGroupFor, navItemFor } from "../lib/nav";
+import { NAV, navItemFor } from "../lib/nav";
 import { session, type Notice, type NoticeKind } from "../lib/session";
 import { fontSize, palette, panelTheme, space } from "../lib/theme";
 
@@ -73,7 +73,6 @@ export function Shell(): SolidChild {
   const [confirmStop, setConfirmStop] = createSignal(false);
 
   const active = createMemo(() => navItemFor(location().pathname));
-  const group = createMemo(() => navGroupFor(active()));
   const instance = store.instance;
   const running = () => instance()?.alive === true;
 
@@ -137,7 +136,6 @@ export function Shell(): SolidChild {
             每一页上都看得见。数据来自 `src/dev-*` 的本机假实现，必须一眼能认出来。
           */}
           {DEV_MODE ? <Chip tone="warning" icon="lucide:triangle-alert" label="模拟数据" /> : null}
-          {group() ? <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>{group()?.label}</Text> : null}
           {active() ? (
             <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
               <Icon name="lucide:chevron-right" size={13} color={palette.textDim} />
@@ -155,7 +153,7 @@ export function Shell(): SolidChild {
               }}
             />
             <Text style={{ fontSize: fontSize.sm, color: running() ? palette.success : palette.textDim }}>
-              {running() ? `运行中 · UDP ${instance()?.port ?? "—"}` : "未运行"}
+              {running() ? "运行中" : "未运行"}
             </Text>
           </View>
           {/* 开关服是最常用的动作，放标题栏，任何页面都能直接按。 */}
@@ -265,7 +263,7 @@ export function Shell(): SolidChild {
         }}
       >
         <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>
-          {instance()?.version ? `版本 ${instance()?.version}` : "未选择版本"}
+          {store.state().current ? `版本 ${store.state().current}` : "未选择版本"}
         </Text>
         <Separator orientation="vertical" />
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
