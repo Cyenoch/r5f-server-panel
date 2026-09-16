@@ -9,10 +9,9 @@
  * 不是滚动容器，窗口默认 1280x820、可用高约 750px，四张卡竖起来会比它高，不滚动就点不到下面两张。
  */
 import { Text, View, type SolidChild } from "@solid-gpui/core";
-import { Input } from "@solid-gpui/core/components";
+import { Input, Select } from "@solid-gpui/core/components";
 import { createMemo, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Select } from "../../components/controls";
 import { Action, Card, Chip, Confirm, Note, PageHeader, PageScroll } from "../../components/ui";
 import { session } from "../../lib/session";
 import { fontSize, palette, space } from "../../lib/theme";

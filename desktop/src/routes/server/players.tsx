@@ -10,6 +10,7 @@ import { Text, View, type SolidChild } from "@solid-gpui/core";
 import {
   Dialog,
   Input,
+  Select,
   Table,
   TableBody,
   TableCell,
@@ -20,7 +21,6 @@ import {
 } from "@solid-gpui/core/components";
 import { createMemo, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Select } from "../../components/controls";
 import { Action, Card, Chip, Confirm, EmptyHint, Note, PageHeader, Toolbar, PageScroll } from "../../components/ui";
 import { session } from "../../lib/session";
 import { font, fontSize, palette, space } from "../../lib/theme";
@@ -39,10 +39,10 @@ const TEAM_ITEMS: ChoiceGroup[] = [
   },
 ];
 
-/** 表头格：六列同一套样式，列宽由 width / flexGrow 决定。 */
+/** 伸缩列显式 width: 0；省略宽度会让原生 Table 用整行宽度作为 flex 基准。 */
 function HeadCell(props: { label: string; width?: number; grow?: boolean }): SolidChild {
   return (
-    <TableHead style={{ width: props.width, flexGrow: props.grow ? 1 : undefined, flexShrink: 0 }}>
+    <TableHead style={{ width: props.width ?? 0, flexGrow: props.grow ? 1 : undefined, flexShrink: 0 }}>
       <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>{props.label}</Text>
     </TableHead>
   );
@@ -201,7 +201,7 @@ function Page(): SolidChild {
           <TableBody>
             {players().map((player) => (
               <TableRow>
-                <TableCell style={{ flexGrow: 1, minWidth: 160, flexShrink: 0 }}>
+                <TableCell style={{ width: 0, flexGrow: 1, minWidth: 160, flexShrink: 0 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minWidth: 0 }}>
                     <Text style={{ fontSize: fontSize.sm, color: palette.text }}>{player.name || "（名字为空）"}</Text>
                     {player.uniqueid === "0" ? <Chip tone="accent" label="机器人" /> : null}
@@ -310,6 +310,7 @@ function Page(): SolidChild {
           <View style={{ gap: space.xs }}>
             <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>队伍</Text>
             <Select
+              accessibilityLabel="机器人队伍"
               items={TEAM_ITEMS}
               value={String(team())}
               placeholder="队伍"

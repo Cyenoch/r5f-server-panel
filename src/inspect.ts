@@ -3,9 +3,14 @@
  *
  * Everything here is async: the TUI renders on a timer, and a synchronous
  * PowerShell call in that path makes keystrokes feel dead.
+ *
+ * 开发模式（R5F_DEV=1）下主机来源换成本机假数据（`dev-host.ts`）；页面上凡是由
+ * 假数据得出的地方都带「模拟」字样 —— 面板宁可说得啰嗦，也不让人把模拟数据当真。
  */
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { DEV_MODE, DEV_ROOT } from "./dev";
+import { collectDevHostFacts } from "./dev-host";
 import {
   type ServerMetrics,
   currentVersion,
@@ -15,7 +20,7 @@ import {
   parseServerTitle,
   summariseLog,
 } from "./serverinfo";
-import { ROOT, type State } from "./state";
+import { ROOT, type Runtime, type State } from "./state";
 import { isPidAlive, stripAnsi } from "./tap";
 import { asRecord, readTextIfPresent } from "./util";
 import * as win from "./win";
@@ -26,6 +31,29 @@ export type Section = { title: string; rows: Row[] };
 
 const POWER_HIGH_PERFORMANCE = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
 const AUTOSTART_TASK = "R5F Dedicated Server";
+
+/** 模拟数据的页面标题：只在开发模式下加后缀，真实运行的文案一字不动。 */
+function sectionTitle(title: string): string {
+  return DEV_MODE ? `${title}（模拟）` : title;
+}
+
+/**
+ * 日志写入方是否还活着。
+ *
+ * 真实模式是独立的日志守护（`runtime.logdPid`）；开发模式的模拟引擎**自己**就是
+ * 日志守护 —— 启动时不给 `logdPid` 赋值（否则停止路径会把它当第二个进程再杀一次），
+ * 所以这里退回实例 pid。写不进去的日志比"守护状态"更值得说清楚，故单独成函数。
+ */
+export function logSinkAlive(runtime: Runtime | null): boolean {
+  if (!runtime) return false;
+  if (runtime.logdPid !== undefined) return isPidAlive(runtime.logdPid);
+  return DEV_MODE && isPidAlive(runtime.pid);
+}
+
+/** 这一档运行记录里**应当**有日志写入方：托管控制台（真实）或模拟引擎（开发）。 */
+function logSinkExpected(runtime: Runtime | null): boolean {
+  return runtime !== null && (runtime.logdPid !== undefined || DEV_MODE);
+}
 
 // --------------------------------------------------------------- json guards
 
@@ -62,6 +90,8 @@ export type HostFacts = {
  * from the host. Returns null when the shell could not be reached.
  */
 export async function collectHostFacts(ports: number[]): Promise<HostFacts | null> {
+  // 开发模式早退：macOS 上没有 PowerShell/CIM，主机信息全部来自假状态文件。
+  if (DEV_MODE) return collectDevHostFacts(ports);
   const portList = ports.filter((p) => Number.isFinite(p) && p > 0);
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
@@ -164,18 +194,17 @@ function logRows(state: State, metrics: ServerMetrics): Row[] {
   } else {
     rows.push({ label: "日志", value: "未启用托管控制台", tone: "yellow" });
   }
-  const daemon = state.runtime?.logdPid ?? 0;
+  const sinkAlive = logSinkAlive(state.runtime);
   rows.push({
     label: "日志记录",
-    value: isPidAlive(daemon) ? "运行中" : daemon ? "已停止（日志不再更新）" : "未启动",
-    tone: isPidAlive(daemon) ? "green" : "yellow",
+    value: sinkAlive ? "运行中" : logSinkExpected(state.runtime) ? "已停止（日志不再更新）" : "未启动",
+    tone: sinkAlive ? "green" : "yellow",
   });
   const ctlPort = state.runtime?.ctlPort ?? 0;
   rows.push({
     label: "远程管理",
-    value:
-      ctlPort > 0 && isPidAlive(daemon) ? "可用（查在线玩家 · 踢人 · 封禁 · 公告）" : "不可用（需要以托管方式启动）",
-    tone: ctlPort > 0 && isPidAlive(daemon) ? "green" : "yellow",
+    value: ctlPort > 0 && sinkAlive ? "可用（查在线玩家 · 踢人 · 封禁 · 公告）" : "不可用（需要以托管方式启动）",
+    tone: ctlPort > 0 && sinkAlive ? "green" : "yellow",
   });
   return rows;
 }
@@ -186,7 +215,10 @@ function hostRows(facts: HostFacts | null, state: State): Row[] {
     return [{ label: "主机信息", value: "读取失败（PowerShell 不可用）", tone: "red" }];
   }
   const pf = facts.pageInitMB === -1 ? "系统托管" : facts.pageInitMB === 0 ? "未配置" : `${facts.pageInitMB} MB 固定`;
-  const rows: Row[] = [
+  const rows: Row[] = DEV_MODE
+    ? [{ label: "主机来源", value: `模拟主机（R5F_DEV=1 · ${DEV_ROOT}）`, tone: "yellow" }]
+    : [];
+  rows.push(
     { label: "物理内存", value: `${facts.ramGB} GB` },
     {
       label: "页面文件",
@@ -223,7 +255,7 @@ function hostRows(facts: HostFacts | null, state: State): Row[] {
       value: facts.taskState.length === 0 ? "未配置" : `${facts.taskState}${triggerLabel(facts.taskTrigger)}`,
       tone: facts.taskState.length === 0 ? undefined : "green",
     },
-  ];
+  );
   return rows;
 }
 
@@ -258,19 +290,19 @@ export async function collectDetail(state: State): Promise<Section[]> {
 
   const procs = (await win.findDediProcessesAsync()).filter((p) => p.path.toLowerCase().startsWith(ROOT.toLowerCase()));
   if (procs.length === 0) {
-    sections.push({ title: "实例", rows: [{ label: "进程", value: "未运行", tone: "dim" }] });
+    sections.push({ title: sectionTitle("实例"), rows: [{ label: "进程", value: "未运行", tone: "dim" }] });
   } else {
     for (const proc of procs) {
       const ports = await win.udpEndpointsAsync(proc.pid);
-      sections.push({ title: "实例", rows: liveInstanceRows(state, proc, ports) });
+      sections.push({ title: sectionTitle("实例"), rows: liveInstanceRows(state, proc, ports) });
     }
   }
 
   const metrics = procs[0] ? parseServerTitle(procs[0].title) : {};
-  sections.push({ title: "日志", rows: logRows(state, metrics) });
+  sections.push({ title: sectionTitle("日志"), rows: logRows(state, metrics) });
 
   const facts = await collectHostFacts([s.port]);
-  sections.push({ title: "主机", rows: hostRows(facts, state) });
+  sections.push({ title: sectionTitle("主机"), rows: hostRows(facts, state) });
 
   const last = state.history.slice(0, 4);
   if (last.length > 0) {
@@ -405,9 +437,9 @@ export async function collectDoctor(state: State): Promise<{ sections: Section[]
         },
       ],
     },
-    { title: "主机检查", rows: hostRows(facts, state) },
+    { title: sectionTitle("主机检查"), rows: hostRows(facts, state) },
     {
-      title: "实例",
+      title: sectionTitle("实例"),
       rows: [
         {
           label: "运行中",
@@ -442,7 +474,7 @@ const CAPABILITY_LABELS: Record<CapabilityId, (port: number) => string> = {
   power: () => "电源计划设为高性能",
 };
 
-/** 主机配置页的清单：每项都来自真实探测，勾选状态即“当前是否已生效”。 */
+/** 主机配置页的清单：每项都来自真实探测（开发模式下来自模拟状态文件），勾选状态即“当前是否已生效”。 */
 export async function collectCapabilities(state: State): Promise<Capability[]> {
   const port = state.settings.port;
   const facts = await collectHostFacts([port]);
@@ -460,7 +492,7 @@ export async function collectCapabilities(state: State): Promise<Capability[]> {
       : facts.pageInitMB === 0
         ? "当前：未配置"
         : `当前：固定 ${facts.pageInitMB} MB`;
-  return [
+  const caps: Capability[] = [
     {
       id: "firewall",
       label: CAPABILITY_LABELS.firewall(port),
@@ -492,4 +524,6 @@ export async function collectCapabilities(state: State): Promise<Capability[]> {
       detail: facts.powerHighPerformance ? "已是高性能" : "当前非高性能",
     },
   ];
+  // 开发模式下清单照旧，只是数据来自假状态文件：在标签上标明，别让人当成真探测。
+  return DEV_MODE ? caps.map((cap) => ({ ...cap, label: `${cap.label}（模拟）` })) : caps;
 }

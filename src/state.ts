@@ -4,6 +4,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { DEV_MODE, DEV_ROOT } from "./dev";
 
 export type Visibility = 0 | 1 | 2;
 export type AuthMode = 0 | 1 | 2;
@@ -95,11 +96,16 @@ export type State = {
 
 /** The directory holding r5-server.exe, its state file and one dir per version. */
 function detectRoot(): string {
+  // 开发模式（R5F_DEV=1）**优先**并压倒一切：状态、版本目录、日志全部落在沙箱里，
+  // 桌面端传进来的 R5_SERVER_ROOT（仓库根）在这一层就不再被当作实例根目录。
+  if (DEV_MODE) return DEV_ROOT;
   // 桌面端：宿主进程与 JS 子进程的 cwd/argv 都不是实例根目录，只能由宿主显式给出。
   const declared = process.env.R5_SERVER_ROOT;
   if (declared !== undefined && declared.trim().length > 0) return resolve(declared);
   const base = basename(process.execPath).toLowerCase();
-  if (base === "bun.exe" || base === "bun") return resolve(import.meta.dir, "..");
+  // Bun 的可执行名不止 `bun` / `bun.exe`：本机（vite-plus 装的 Bun）叫 `bun.native`。
+  // 逐名精确匹配：编译产物也叫别的名字，宽前缀会把它们错当成解释器。
+  if (base === "bun.exe" || base === "bun" || base === "bun.native") return resolve(import.meta.dir, "..");
   return dirname(process.execPath);
 }
 

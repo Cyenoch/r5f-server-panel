@@ -25,6 +25,7 @@ import {
   type PlayerRow,
   type StartOptions,
   type StartOutcome,
+  type StopResult,
   NO_CONTROL_MESSAGE,
   NoControlChannelError,
   botsAdd,
@@ -42,6 +43,8 @@ import {
   startInstance,
   stopInstance,
 } from "./commands";
+import { DEV_MODE } from "./dev";
+import { ensureDevFixtures } from "./dev-fixtures";
 import {
   type Capability,
   type Health,
@@ -49,6 +52,7 @@ import {
   collectCapabilities,
   collectHealth,
   collectHostFacts,
+  logSinkAlive,
 } from "./inspect";
 import { type ModerationEntry, type ModerationFile, describeExpiry, loadModeration } from "./moderation";
 import { type Receipt } from "./receipt";
@@ -66,7 +70,7 @@ import {
   record,
   saveState,
 } from "./state";
-import { isPidAlive, readDelta, readTailState, stripAnsi } from "./tap";
+import { readDelta, readTailState, stripAnsi } from "./tap";
 import { type VersionInfo, discoverVersions, formatSize } from "./versions";
 import * as win from "./win";
 
@@ -108,6 +112,17 @@ export type {
 
 /** 动作结果：`"no-control"` 表示实例不是托管控制台启动的（界面统一按"要重启"处理）。 */
 export type ActionResult<T> = T | "no-control";
+
+/** 开发模式（R5F_DEV=1）：界面据此在标题栏打「模拟」标；数据本身由采集器各自标注。 */
+export { DEV_MODE };
+
+/**
+ * 面板模块引导：补齐开发沙箱（fixtures + 状态文件）。
+ *
+ * 桌面端第一次 `loadState()` 之前必须已经就位（`session.ts` 会先 import 本模块），
+ * 否则模拟实例选中的版本目录还不存在。非开发模式是空操作。
+ */
+ensureDevFixtures();
 
 // ------------------------------------------------------------------ 版本
 
@@ -180,10 +195,14 @@ export async function collectDediProcesses(): Promise<win.ProcInfo[]> {
   return win.findDediProcessesAsync();
 }
 
-/** 日志守护还活着吗：守护死了日志就不再增长，界面要如实说出来。 */
+/**
+ * 日志守护还活着吗：守护死了日志就不再增长，界面要如实说出来。
+ *
+ * 开发模式没有独立的守护进程 —— 模拟引擎自己写日志（启动时不设 `logdPid`），
+ * 所以判断落在实例 pid 上；真实模式仍然只看 `logdPid`。
+ */
 export function logDaemonAlive(state: State): boolean {
-  const pid = state.runtime?.logdPid;
-  return pid !== undefined && isPidAlive(pid);
+  return logSinkAlive(state.runtime);
 }
 
 // ------------------------------------------------------------------ 日志
@@ -236,12 +255,20 @@ export async function launchInstance(state: State, opts: StartOptions): Promise<
   return startInstance(state, opts, () => {});
 }
 
+/**
+ * 停止实例。**没确认停止就抛错**（而不是返回 0 装作停过了）：界面把错误显示出来，
+ * 实例记录仍然保留，可以再停一次。
+ */
 export function killInstance(state: State, all = false): number {
-  return stopInstance(state, { all }).killed;
+  const stopped: StopResult = stopInstance(state, { all });
+  if (stopped.error !== undefined) throw new Error(stopped.error);
+  return stopped.killed;
 }
 
 export async function restartInstance(state: State, opts: StartOptions): Promise<StartOutcome> {
-  stopInstance(state, {});
+  const stopped = stopInstance(state, {});
+  // 旧实例没停下来就不要再起一个：那会变成第二个实例（模拟模式更是直接拒绝）。
+  if (stopped.error !== undefined) return { ok: false, error: stopped.error };
   return startInstance(state, { ...opts, force: true }, () => {});
 }
 

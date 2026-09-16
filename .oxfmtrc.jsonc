@@ -27,6 +27,7 @@
     "node_modules/**",
     "dist/**",
     // solid-gpui 子模块：第三方源码，不归本仓库的风格管辖。
+    // fmt 脚本关闭嵌套配置发现，防止子模块自己的配置覆盖此处排除项。
     "vendor/**",
     // 路由生成产物（文件头明确要求排除）。
     "desktop/src/routeTree.gen.ts",

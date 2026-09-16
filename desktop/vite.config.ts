@@ -16,11 +16,12 @@ export default defineConfig({
     solidGpui({
       entry: "src/app.tsx",
       runtime: "bun",
-      // 不写 native 模块，但**必须**走 `native`：它让 Vite 用我们这个宿主执行
-      // `--export-native`，把 gpui-component 的组件目录（含 catalog digest）现场生成到
-      // src/generated/native.ts，并让 `@solid-gpui/core/components` 指过去。
-      // 用 `host` 的话组件目录取的是仓库里 checked-in 的 components.ts —— 它的
-      // digest 与本机宿主编译出来的对不上，宿主会拒绝所有渲染提交（实测）。
+      // 用 `native`：它按 Cargo 工程构建并监听我们这个宿主，再让宿主执行 `--export-native`，
+      // 把 gpui-component 的组件目录（含 catalog digest）现场生成到 src/generated/native.ts，
+      // 供 `@solid-gpui/core/components` 使用。宿主是应用自有的 Rust 工程（只注册内置组件模块），
+      // 正是 `native` 的适用场景：不用声明应用自有的原生模块，也能自动重建（上游 docs/vite.md）。
+      // 早先那条"用 `host` 会拿到 checked-in 目录、digest 对不上"的结论已作废：`host` 现在也会
+      // 用自己那个可执行文件导出目录，导出失败就报错，不再替换成 SDK 里的绑定。
       native: {
         manifestPath: "native/Cargo.toml",
         bin: "r5-server-gui",

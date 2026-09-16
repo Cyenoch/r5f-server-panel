@@ -11,7 +11,17 @@ import { Text, View, type SolidChild } from "@solid-gpui/core";
 import { Scrollable, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@solid-gpui/core/components";
 import { createEffect, createMemo, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Action, Card, EmptyHint, KeyValueList, Note, PageHeader, toneColor, type Tone } from "../../components/ui";
+import {
+  Action,
+  Card,
+  EmptyHint,
+  KeyValueList,
+  Note,
+  PageHeader,
+  PageScroll,
+  toneColor,
+  type Tone,
+} from "../../components/ui";
 import { formatDateTime, formatRelative } from "../../lib/format";
 import { session } from "../../lib/session";
 import { font, fontSize, palette, radius, space } from "../../lib/theme";
@@ -57,10 +67,10 @@ function ReceiptNote(props: { receipt: ReloadReceipt }): SolidChild {
   );
 }
 
-/** 表头格：列宽由 width / grow 决定，样式统一。 */
+/** 伸缩列显式 width: 0；省略宽度会让原生 Table 用整行宽度作为 flex 基准。 */
 function HeadCell(props: { label: string; width?: number; grow?: boolean }): SolidChild {
   return (
-    <TableHead style={{ width: props.width, flexGrow: props.grow ? 1 : undefined, flexShrink: 0 }}>
+    <TableHead style={{ width: props.width ?? 0, flexGrow: props.grow ? 1 : undefined, flexShrink: 0 }}>
       <Text style={{ fontSize: fontSize.sm, color: palette.textMuted }}>{props.label}</Text>
     </TableHead>
   );
@@ -122,16 +132,10 @@ function Page(): SolidChild {
   });
 
   return (
-    <View
+    <PageScroll
       style={{
-        flexGrow: 1,
-        minHeight: 0,
-        minWidth: 0,
-        flexDirection: "column",
         gap: space.lg,
         padding: space.xl,
-        // 外壳的内容区没有滚动容器：两个卡片（台账 + 引擎名单）叠起来比视口高，页面自己滚。
-        overflow: "scroll",
       }}
     >
       <PageHeader
@@ -178,7 +182,7 @@ function Page(): SolidChild {
             <TableBody>
               {ledger().map((entry) => (
                 <TableRow>
-                  <TableCell style={{ flexGrow: 1, minWidth: 200, flexShrink: 0 }}>
+                  <TableCell style={{ width: 0, flexGrow: 1, minWidth: 200, flexShrink: 0 }}>
                     <View style={{ flexDirection: "column", gap: 2, minWidth: 0 }}>
                       <Text style={{ fontSize: fontSize.sm, color: palette.text }}>{entry.name || "（名字为空）"}</Text>
                       <Text style={{ fontFamily: font.mono, fontSize: fontSize.xs, color: palette.textDim }}>
@@ -255,6 +259,6 @@ function Page(): SolidChild {
           </View>
         ) : null}
       </Card>
-    </View>
+    </PageScroll>
   );
 }

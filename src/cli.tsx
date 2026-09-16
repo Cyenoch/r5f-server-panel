@@ -39,8 +39,12 @@ import {
   cmdUse,
   type SettingChange,
 } from "./commands";
+import { DEV_MODE } from "./dev";
+import { runDevEngine } from "./dev-engine";
+import { ensureDevFixtures } from "./dev-fixtures";
+import { requestDevStop } from "./dev-protocol";
 import { type FieldId } from "./settings-fields";
-import { ROOT, loadState } from "./state";
+import { ROOT, loadState, type Settings } from "./state";
 import { runLogDaemon } from "./tap";
 import { closePrompt, red } from "./ui";
 import { initConsole } from "./win";
@@ -48,6 +52,8 @@ import { initConsole } from "./win";
 const CLI_VERSION = "2.0.0";
 
 initConsole();
+// 开发沙箱必须在第一次读状态之前就位（版本目录 / 状态文件都由它补齐）。
+ensureDevFixtures();
 const state = loadState();
 
 const collect = (value: string, previous: string[] = []): string[] => [...previous, value];
@@ -145,7 +151,8 @@ function buildProgram(): Command {
     .command("restart")
     .description("重启当前版本")
     .action(async () => {
-      cmdStop(state, {});
+      // 旧实例没停下来就别再起一个（否则会变成第二个实例，模拟模式更是直接拒绝）。
+      if (cmdStop(state, {}) !== 0) return;
       process.exitCode = await cmdStart(state, {});
     });
 
@@ -517,6 +524,36 @@ function buildProgram(): Command {
         });
       },
     );
+
+  // hidden: 开发模式（R5F_DEV=1）的本机模拟引擎。`start` 在开发模式下就是拉起它，
+  // 面板/CLI 之外不该有人直接跑这两条；非开发模式下直接拒绝。
+  program
+    .command("__dev-engine", { hidden: true })
+    .description("开发模式的本机模拟引擎（由 start 拉起）")
+    .requiredOption("--version-path <path>", "沙箱内的模拟版本目录")
+    .requiredOption("--settings <json>", "启动设置 JSON")
+    .requiredOption("--log <path>", "引擎日志文件（命令回执从这里读回）")
+    .requiredOption("--ctl-token <token>", "控制通道口令")
+    .action(async (opts: { versionPath: string; settings: string; log: string; ctlToken: string }) => {
+      if (!DEV_MODE) throw new Error("模拟引擎只在 R5F_DEV=1 时可用。");
+      process.exitCode = await runDevEngine({
+        versionPath: opts.versionPath,
+        settings: JSON.parse(opts.settings) as Settings,
+        logFile: opts.log,
+        ctlToken: opts.ctlToken,
+      });
+    });
+
+  // hidden: 模拟实例的同步停止入口（`win.killTree` 在开发模式下用它）。
+  // 它不直接发信号，而是走引擎的控制通道让引擎自己收尾。
+  program
+    .command("__dev-stop", { hidden: true })
+    .description("停掉一个开发模式模拟实例（按 pid）")
+    .argument("<pid>", "state.runtime 里记录的模拟引擎 pid")
+    .action(async (pid: string) => {
+      if (!DEV_MODE) throw new Error("模拟引擎只在 R5F_DEV=1 时可用。");
+      process.exitCode = (await requestDevStop(Number(pid))) ? 0 : 1;
+    });
 
   // 不带子命令即打开桌面面板：这个 exe 对服主来说就是"服务器面板"，
   // 帮助仍然可以用 `--help` 显式取。

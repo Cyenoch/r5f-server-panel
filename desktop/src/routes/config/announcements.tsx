@@ -9,10 +9,18 @@ import type { Announcement, AnnouncementsFile } from "@server/announcements";
  * `mapArray` 按引用复用行节点，换引用会让正在输入的那一行被重建、输入框当场失焦。
  */
 import { Text, View, type SolidChild } from "@solid-gpui/core";
-import { Input, Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@solid-gpui/core/components";
+import {
+  Input,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@solid-gpui/core/components";
 import { createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute, useNavigate } from "@solid-gpui/router";
-import { Select } from "../../components/controls";
 import { Action, Card, Chip, EmptyHint, Note, PageHeader, PageScroll } from "../../components/ui";
 import { session } from "../../lib/session";
 import { fontSize, palette, space } from "../../lib/theme";

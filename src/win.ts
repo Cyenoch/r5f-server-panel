@@ -1,18 +1,38 @@
 /**
  * Windows helpers: console setup (UTF-8 + ANSI via FFI), admin detection,
  * UAC self-elevation, PowerShell execution, process queries.
+ *
+ * 开发模式（R5F_DEV=1，macOS 上跑本机模拟器）下这里只剩外壳：每个查询转发给
+ * `dev-host.ts` 的假数据；真的需要 Windows 的地方（PowerShell、提权）直接报错 ——
+ * 宁可失败得明明白白，也不假装在 Windows 上执行过、更不在 macOS 上起一个
+ * `powershell` 子进程。
  */
 import { dlopen, FFIType } from "bun:ffi";
+import { DEV_MODE } from "./dev";
+import {
+  devFindDediProcesses,
+  devFirewallRuleExists,
+  devGetProcess,
+  devPhysicalRamGB,
+  devPortInUse,
+  devUdpEndpoints,
+} from "./dev-host";
+import { stopDevEngine } from "./dev-protocol";
 
 const STD_OUTPUT_HANDLE = -11;
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
 
 let consoleReady = false;
 
+/** 开发模式里所有真实的 Windows 调用都在这里拦下（调用方本该先走 dev 分支）。 */
+const DEV_BLOCKED = "开发模式（R5F_DEV=1）不执行 Windows 命令：主机与进程数据来自 src/dev-host.ts 的模拟实现。";
+
 /** Switch the console to UTF-8 and enable ANSI escape handling. Best effort. */
 export function initConsole(): void {
   if (consoleReady) return;
   consoleReady = true;
+  // macOS / Linux（含开发模式）没有 Win32 控制台可设置：别去 dlopen kernel32.dll。
+  if (process.platform !== "win32") return;
   try {
     const k32 = dlopen("kernel32.dll", {
       SetConsoleOutputCP: { args: [FFIType.u32], returns: FFIType.i32 },
@@ -56,6 +76,7 @@ function psCommand(script: string, interactive = false): string[] {
 
 /** Run a PowerShell script body supplied inline. */
 export function ps(script: string, opts: { cwd?: string } = {}) {
+  if (DEV_MODE) throw new Error(DEV_BLOCKED);
   return run(psCommand(script), opts);
 }
 
@@ -71,6 +92,7 @@ async function runAsync(cmd: string[], opts: { cwd?: string } = {}) {
 }
 
 export async function psAsync(script: string, opts: { cwd?: string } = {}) {
+  if (DEV_MODE) throw new Error(DEV_BLOCKED);
   return runAsync(psCommand(script), opts);
 }
 
@@ -80,6 +102,8 @@ export function psQuote(s: string): string {
 }
 
 export function isAdmin(): boolean {
+  // 模拟主机当作「已经就绪」：开发模式不该出现 UAC，也不该因此拦住任何操作。
+  if (DEV_MODE) return true;
   const r = ps(
     "([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
   );
@@ -92,6 +116,7 @@ export function isAdmin(): boolean {
  * declined (the shell reports 1223 = ERROR_CANCELLED).
  */
 export async function elevateSelf(args: string[]): Promise<number | null> {
+  if (DEV_MODE) throw new Error(DEV_BLOCKED);
   const script = [
     "$ErrorActionPreference='Stop'",
     "try {",
@@ -178,23 +203,30 @@ function parseProcJson(out: string): ProcInfo[] {
 }
 
 export function getProcess(pid: number): ProcInfo | null {
+  if (DEV_MODE) return devGetProcess(pid);
   return parseProcJson(ps(processQuery(`-Id ${pid}`)).out)[0] ?? null;
 }
 
 /** 同一份查询的非阻塞版本：面板按秒轮询，绝不能在渲染循环里跑 spawnSync。 */
 export async function getProcessAsync(pid: number): Promise<ProcInfo | null> {
+  if (DEV_MODE) return devGetProcess(pid);
   return parseProcJson((await psAsync(processQuery(`-Id ${pid}`))).out)[0] ?? null;
 }
 
 export function findDediProcesses(name = "r5apex_ds"): ProcInfo[] {
+  if (DEV_MODE) return devFindDediProcesses(name);
   return parseProcJson(ps(processQuery(`-Name ${name}`)).out);
 }
 
 export async function findDediProcessesAsync(name = "r5apex_ds"): Promise<ProcInfo[]> {
+  if (DEV_MODE) return devFindDediProcesses(name);
   return parseProcJson((await psAsync(processQuery(`-Name ${name}`))).out);
 }
 
 export function killTree(pid: number): boolean {
+  // 模拟实例是**真实存在**的子进程，停止要走它自己的控制通道（`__dev-stop`），
+  // 绝不对 OS pid 发信号：那个 pid 在我们拿到它之后可能已经被系统复用了。
+  if (DEV_MODE) return stopDevEngine(pid);
   return run(["taskkill", "/PID", String(pid), "/T", "/F"]).code === 0;
 }
 
@@ -207,16 +239,19 @@ function udpEndpointsQuery(pid: number): string {
 }
 
 export function udpEndpoints(pid: number): string[] {
+  if (DEV_MODE) return devUdpEndpoints(pid);
   const r = ps(udpEndpointsQuery(pid));
   return r.out ? r.out.split(/\r?\n/).filter(Boolean) : [];
 }
 
 export async function udpEndpointsAsync(pid: number): Promise<string[]> {
+  if (DEV_MODE) return devUdpEndpoints(pid);
   const r = await psAsync(udpEndpointsQuery(pid));
   return r.out ? r.out.split(/\r?\n/).filter(Boolean) : [];
 }
 
 export function portInUse(port: number): boolean {
+  if (DEV_MODE) return devPortInUse(port);
   return (
     ps(
       `if (Get-NetUDPEndpoint -LocalPort ${port} -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }`,
@@ -225,10 +260,12 @@ export function portInUse(port: number): boolean {
 }
 
 export function physicalRamGB(): number {
+  if (DEV_MODE) return devPhysicalRamGB();
   return toNumber(ps("[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)").out);
 }
 
 export function firewallRuleExists(displayName: string): boolean {
+  if (DEV_MODE) return devFirewallRuleExists(displayName);
   return (
     ps(
       `if (Get-NetFirewallRule -DisplayName ${psQuote(displayName)} -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }`,

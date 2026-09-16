@@ -1,134 +1,135 @@
-# solid-gpui 踩坑记录（Windows / 本 pin）
+# solid-gpui 适配与剩余问题
 
-面板用 [solid-gpui](https://github.com/Cyenoch/solid-gpui) 写（子模块 `vendor/solid-gpui`，pin `66f17e0`）。
-下面每一条都是**本机实测**出来的：症状 → 证据 → 我们怎么绕开。上游修了就能删掉对应条目。
+更新时间：2026-09-16。子模块从 `66f17e0` 更新到 **`fbd73f66d54d0725d1c901a7cfc358d1a367d676`**。
 
-环境：Windows 11 26200 / `r5-server-gui.exe`（debug 宿主）+ Bun 1.4.2 子进程。
+证据分开记录：**本机实测**指本面板在 macOS 的运行；**上游记录**指 SDK 自己的示例/测试；**源码分析**不等于测出了性能或验证过 Windows。
 
----
+## 旧十条痛点的处理
 
-## 1. 宿主栈溢出（`thread 'main' has overflowed its stack`，退出码 29）
+| 原问题                              | 当前结论                                                                        | 本仓库适配                                                                                                                                       |
+| ----------------------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1. Windows 宿主栈溢出               | 上游 runner 管理应用线程与栈，默认 16 MiB；不是消除了任意深度递归。             | 删除自建 256 MiB 线程与 `AppHost` 转发包装，传入 profile 工厂，首帧配置使用 `ComponentHost::with_initialize`。[入口与栈策略][stack]              |
+| 2. 嵌套 `undefined` 使渲染器退出    | 对象成员里的 `undefined` 现在递归省略；数组元素仍严格拒绝。                     | 删除 `definedChoice`，直接使用原生 Select。[JSON 边界][json]                                                                                     |
+| 3. Select 当前值必须在 items 中     | 现在保留未解析的受控 key，目录到达后再解析；空 key/重复 key 仍非法。            | 删除 `controls.tsx`，迁移全部 6 个调用页面；保留数据源去重与空值哨兵，配置页不再撤掉未知 `value`。[选择状态][choices]                            |
+| 4. `hotKey` 与空首帧                | 上游没有独立定位旧报告的根因；本次已验证推荐写法可在本面板启动和热重载。        | 启用 `hotKey: import.meta.hot ? import.meta.url : undefined`；实测同一窗口/宿主保留 `/server/players`，日志到达 epoch 3。[生命周期][application] |
+| 5. `host` / `native` 组件目录不一致 | 显式 `host` 也导出自身契约，不再替换为 SDK 静态目录。                           | 保留适合自有 Cargo 宿主的 `native:` 配置，仅修正旧注释。换 pin 后重新生成绑定。[导出契约][catalog]                                               |
+| 6. Windows `.SystemUIFont` 无法解析 | 上游从 Windows OS UI 字体解析别名。                                             | 删除 Microsoft YaHei UI 手动覆盖。Windows 字体观感仍待目标机验证。[字体解析][font]                                                               |
+| 7. 长页面滚动/剩余空间布局          | 有界视口与自然高度内容仍是调用契约；布局正确不代表滚动足够快。                  | 保留 `PageScroll`，封禁页也改用该公共组件；用户本轮报告的卡顿单独列为未解决性能问题。[滚动规则][scroll]                                          |
+| 8. Solid `For` / `Show` 类型不兼容  | `@solid-gpui/core/runtime` 已导出原生类型的控制流组件。                         | 删除禁用注释，不为改语法而重写现有页面。[原生控制流][runtime]                                                                                    |
+| 9. 宿主强杀留下 Bun 孤儿            | 默认 `StdioTransport` 随 stdin EOF/错误结束渲染器，自定义流需显式选择退出策略。 | 删除 `watchHostProcess`；本机强杀测试通过，detached 模拟引擎仍存活。[stdio 生命周期][stdio]                                                      |
+| 10. 图标白名单                      | 有意的离线契约，不是待修缺陷；可注册应用图标。                                  | 保持类型检查，不把任意字符串强转为 `IconName`。[图标契约][icons]                                                                                 |
 
-**症状**：面板起来后 2–9 秒随机崩，窗口一闪。退出码 29。
+`Action` 的样式和 `MotionMode::Reduced` 继续保留，属于产品选择，不再用“原生 Button 必崩”解释。
 
-**证据**
+### 同时修正的应用侧用法
 
-- `Button` / `TabBar` 这类**带动画**的控件必崩；`motion::set(Reduced)` 后它们不再崩，但复杂布局（配置页 14 项设置）仍偶发崩。
-- 60 秒常驻 + 反复切路由的 soak 里，把应用放到 256 MiB 栈的线程上跑就完全不复现；默认 1 MiB 主线程栈必崩。
+- **按钮名称与键盘**：公共 `Action` 增加名称、禁用语义、焦点和 Enter/Space 激活。禁用时必须同时移除 `onKeyDown`，否则违反 `Pressable onKeyDown requires focusable=true`。本次遇到该校验后已修正，随后成功启动模拟实例并打开机器人对话框。
+- **表格伸缩列**：玩家页实测只有第一列可见。Kit 在单元格省略 width 时使用 100% flex basis；我们又指定 `flexShrink: 0`，挤出了其他列。玩家/封禁表的伸缩列改为 `width: 0 + flexGrow: 1`；玩家六列和封禁五列均已目视确认。[Kit 单元格默认布局][table]
+- **封禁页纵向压缩**：改用现有 `PageScroll`，不再让卡片挤在视口高度里导致台账行被压扁。已确认台账行可见。
+- **受控确认无需业务手写**：生成的 Select props 已 `Omit<..., "ackEditSeq">`，SDK 自动回填确认序号。不能因为页面没有传 ack 就认定它有问题。[自动确认][ack]
 
-**结论**：本 pin 的 vendored gpui 在 Windows 上会走出很深的递归（布局与过渡动画两条路径都观察到过），1 MiB 栈不够；栈深本身是有限且稳定的。
+这些不是要求上游修复的应用 bug。
 
-**做法**（`desktop/native/src/main.rs`）
+## 已修复：高内容页面滚动卡顿（用户已于 2026-09-16 确认）
 
-- 应用整体放在自建的 256 MiB 栈线程上执行（GPUI 在 Windows 不要求主线程）。
-- 关掉装饰性动画：`solid_gpui::motion::set(MotionMode::Reduced, cx)`（产品上也成立：运维面板不需要动效）。
-- UI 里不使用 gpui-component 的 `Button` / `TabBar` / `Tab`，用 `Pressable + Icon + Text` 自建（`components/ui.tsx` 的 `Action`）。
+**用户报告**：“服务器配置等内容区域很高的页面，性能很差，滚动的时候很卡顿。”补丁热更新后，用户在同一 macOS 窗口、同一窗口大小下复测，确认**不卡了**。用户确认是本条的验收信号。
 
----
+**原因（源码级，未做 CPU 采样）**：设置页有 14 组控件；外壳主内容行、剩余宽度列、设置页右栏与字段编辑器包装都靠 `flexGrow` 占剩余空间，却没有明确初始主轴尺寸。Taffy 在 `flex-basis: auto` 且主轴尺寸不确定时，会先按 max-content 测量子树再分配剩余空间（`taffy 0.13.0/src/compute/flexbox.rs:743-803`），于是每帧都要对整棵长页面做 intrinsic 探测。上游对这类容器已有相同规则：给零初始尺寸。[已知性能案例][scroll]
 
-## 2. 数据 props 里的嵌套 `undefined` 会打死渲染器
+**改动（有界，仅此三处）**：
 
-**症状**：点某个页面 → 窗口变白、Bun 子进程退出、宿主报 `renderer runtime terminated unexpectedly: exited with status 1`。
+- `desktop/src/components/shell.tsx`：主内容行加 `height: 0`，其内容列加 `width: 0`；
+- `desktop/src/routes/config/server.tsx`：右栏、字段当前值、编辑器包装加 `width: 0`；
+- 保留原有最小尺寸、全部 14 项控件、文字换行与内容自然高度；未引入分页、虚拟列表、固定内容高度或布局缓存。
 
-**证据**：`r5-server-gui.js` 抛
-`TypeError: Native JSON contains an unsupported value at jsonValue ... at encodeJson`。
-源码在 `packages/solid-gpui/src/native.ts`：顶层 props 的 `undefined` 会被丢掉（`omitUndefined: true`），
-`style` 根本不走 JSON（`HOST_PROPS`），但**数组/对象里的 `undefined` 直接抛**。
-最小复现：`Select` 的某个选择项带 `description: undefined`。
+**同时排除的假设**：`session.ts` 的 fast/slow 定时器只更新实例、玩家、日志与体检，不更新 settings/catalog；`PageScroll` 未订阅 `onScroll`，滚轮路径无需逐帧 JS 回传。所以不是“定时器反复重建全部设置编辑器”。运行中实例每 1.5 秒一次的窗口标题命令会触发一次整树重建，是独立的周期性小停顿，本次未处理。
 
-**做法**：`desktop/src/components/controls.tsx` 包一层 `Select`，进原生层之前剔掉可选字段的 `undefined`，并统一从那里导出。页面不要再直接从 `@solid-gpui/core/components` 拿 `Select`。
+**边界**：只有用户观感确认，没有前后 CPU 采样或 `frame-profile` 数字；未验证其他长页面，未在 Windows 目标平台验证。要定量或防回归，按上游流程采集对应时段的原生主线程调用栈/帧指标，并与空闲区间分开统计。[测量边界][perf]
 
----
+## 仍需处理的痛点
 
-## 3. `Select` 的原生硬校验：选中的值必须在 items 里
+### P1：原生 Select 弹出选项缺少可访问名称
 
-**症状**：窗口画不出来（首帧被拒），宿主只回一行英文：
-`surface 1 rejected commit: extension node N has invalid properties: selected choice keys must be unique and present in items`；
-Bun 子进程随后 `exit 1`。
+**本机实测**，不是公共 `Action` 未传 label 那个应用问题：
 
-**证据**：`crates/solid-gpui/src/components/choices.rs` 的 `validate()` —— 分组 key 与条目 key 必须非空且唯一，
-且 `value`（或 `defaultValue`）必须命中某个条目 key，否则整个提交被拒。
-实测踩点：控制面板的模式下拉，`value` 来自配置里的模式 id，而清单要异步读服务器目录 —— 两者对不上是常态，不是异常。
+1. `bun run gui:dev`，玩家列表 → 加机器人 → 展开“机器人队伍”。
+2. Select 已显式传 `accessibilityLabel="机器人队伍"`；画面显示三个队伍选项。
+3. AX 树能读到触发器名称和值，弹出内容却只有三个无名 `group`：
 
-**做法**：同一个包装层里
+```text
+popupbutton "机器人队伍": "队伍 0（默认）"
+list
+  group
+  group
+  group
+```
 
-- 丢掉空 key、跨分组去重；
-- 当前值不在清单里时**补一条同名条目**（`description: "当前值"`）—— 界面显示"现在的值"，宿主也永远校验通过。
-  早先试过"值不合法就不传"，在受控组件路径上不可靠（JS 侧还会重发一次），别回退到这个写法。
+最小组件形状（不用本项目包装层）：
 
----
+```tsx
+<Select
+  accessibilityLabel="机器人队伍"
+  value="0"
+  items={[
+    {
+      key: "teams",
+      items: [
+        { key: "0", label: "队伍 0（默认）" },
+        { key: "1", label: "队伍 1" },
+        { key: "2", label: "队伍 2" },
+      ],
+    },
+  ]}
+/>
+```
 
-## 4. 开发模式：`hotKey` 让首次提交变成空 diff
+键盘向下 + Enter 可以将当前值改成“队伍 1”，因此不是选项未加载。问题在于读屏/按名称自动化无法辨认内部选项。
 
-**症状**：`bun --bun vite` 起不来，`Error: application must render a nonempty initial tree`（`application.ts` 的 `assertReady`）。
-生产构建（`vite build` + `--production`）没有这个问题。
+源码链：[SearchableListAdapter][list-adapter] 把 `item.render()` 当视觉子节点传入；[SearchableListItemElement][list-item] 绘制文字、勾选和禁用样式，但没有提供选项名称/角色。建议上游在内部选项行暴露名称、选中/禁用状态和操作语义，并加平台 AX 验证。仅给外部 Select 加 label 无法补齐内部选项。
 
-**证据**：同一份代码去掉 `hotKey` 就能正常挂载；带上时 `mountApplication` 把这次求值当成对**已提交树**的重挂载，
-首帧被算成空 diff，`CandidateTransport.frames` 为空 → 宿主拒绝提交。
+### P2：Vite 原生配置加载兼容性告警
 
-**做法**：`desktop/src/app.tsx` 不传 `hotKey`。插件的开发循环本来就是"保存即重开会话"，没有实际损失。
+**本仓库 `bun run gui:build` 实际输出**：上游 router 的 Vite 插件使用无扩展名相对导入，不兼容 Vite 计划采用的默认 `configLoader: 'native'`：
 
----
+- `packages/solid-gpui-router/src/vite.ts`：`./generation-session`、`./generator`；
+- `packages/solid-gpui-router/src/generation-session.ts`：`./generator-engine`。
 
-## 5. 组件目录 digest 对不上：必须用 `native` 而不是 `host`
+当前 Vite 8.2.2 构建成功，这不是当前构建阻断。建议上游补全配置执行链的扩展名，并给源码消费场景加 native config-loader 验证；不要靠 `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` 隐藏问题。[插件入口][router-vite]
 
-**症状**：宿主接受连接但拒绝所有渲染提交（`native contract mismatch`）。
+### P1（发布验证）：本面板 Windows x64/MSVC 尚未验收
 
-**原因**：`host` 选项用的是仓库里 checked-in 的 `components.ts`，它的 catalog digest 与本机宿主编译出来的不同。
+上游记录使用 Windows 11 ARM64 VM、x86-64 GNU debug 宿主和 ARM64 Bun；不是本面板，也不是 MSVC 验证。[上游资格边界][verification]
 
-**做法**：`desktop/vite.config.ts` 用 `native: { manifestPath, bin, output }`，让 Vite 用**我们自己的宿主**执行
-`--export-native`，现场生成 `desktop/src/generated/native.ts`（构建产物，不入库）。
+本面板过去只知 Windows 的 1 MiB 会崩、256 MiB 可运行。上游示例的 16 MiB 通过，**不能推导出本面板已通过或最小栈就是 16 MiB**。发布前需在目标 Windows x64/MSVC 环境验证复杂页面、连续切页与中文字体；用 `SOLID_GPUI_LOG=info` 查看预留，必要时通过上游的 `SOLID_GPUI_APP_STACK_BYTES` 指定预算，不恢复应用自建线程。
 
----
+对上游的诉求是补目标平台 CI/可重复运行证据；本面板自身的发布验收仍由我们负责。另有 `block v0.1.6` 的 Rust future-incompatibility 告警，目前不阻断构建。
 
-## 6. 默认字族 `.SystemUIFont` 在 Windows 上不存在
+## 本轮验证记录与边界
 
-**症状**：中文与部分文本走字体回落路径，渲染异常。
+- `cargo build --manifest-path desktop/native/Cargo.toml --locked`：通过。
+- `bun run check`：类型、规则、格式全部通过。
+- `bun run gui:build`：通过，实际宿主重新导出了原生绑定。
+- SDK 定向回归：`native`、`control-flow`、`stdio-host-lifetime`、`application`，共 **19 passed / 0 failed，136 assertions**。命令需带 `--conditions=browser --preload ./vendor/solid-gpui/scripts/solid-jsx.ts`；漏掉 browser 条件会解析到 Solid SSR，不是上游回归。
+- macOS 原生窗口：启动模拟实例、Action 键盘激活、机器人队伍选择、玩家/台账表格列均已观察；不是 Windows 验证。
+- 开发期：同一宿主 PID/窗口经历 managed reload，保留玩家路由，日志出现 epoch 3；后续修改也成功热重载。
+- 未知目录值：持久地图临时设为 `dev_unlisted_map` 后冷启动，页面显示该配置值和“当前值不在清单里”，没有提交被拒/渲染器退出；测试后已恢复原地图。
+- 强杀已确认身份的本面板宿主，50 ms 轮询在约 **54 ms** 时发现 Bun renderer 已退出，模拟引擎仍活着。这个数字是一次退出检测，不是延迟基准。
+- **滚动流畅度：用户已确认修复**。补齐剩余空间容器的零初始尺寸后，用户在同一窗口复测“服务器配置”页并确认“不卡了”。这是观感验收，不是 CPU 或帧时间测量；先前合成滚轮没有可靠内容位移证据，仍不计入通过项。
 
-**做法**：宿主 `initialize` 里 `gpui_component::Theme::global_mut(cx).font_family = "Microsoft YaHei UI"`。
-（字体**不是**栈溢出的原因，见第 1 条。）
-
----
-
-## 7. 布局：GPUI 不是 CSS
-
-- **每一层都要显式 `flexDirection`**。默认 `row`：子节点的 `flexGrow` 会去撑宽而不是撑高。
-  本机踩点：外壳内容区少写一个 `flexDirection: "column"`，页面里的 `height: 0 + flexGrow: 1` 滚动区塌成 0 高度 → 整页空白。
-- **占满剩余高度** = `height: 0 + flexGrow: 1 + minHeight: 0`（`height: 0` 是初始主轴尺寸，不是最终高度）。
-- **`overflow: "scroll"` 放在同时带 `flexGrow: 1` 的根节点上不会滚**：根被撑到视口高度，内容超出只是被裁掉，
-  滚动条不出现、滚轮也不动，底部内容永远够不到。
-  **做法**：`components/ui.tsx` 的 `PageScroll` —— 外层 `Scrollable` 负责滚动，内层 `flexShrink: 0` 保持自然高度。
-- 裸文本必须包在 `<Text>` 里；未知 prop 直接抛 `Unknown native prop: x`。
-
----
-
-## 8. Solid 的 `For` / `Show` 类型与原生 JSX 运行时不兼容
-
-**做法**：条件用 `? :`，列表用 `.map()`。这条写进了 `components/ui.tsx` 开头的硬约束。
-
----
-
-## 9. 宿主被强杀时 Bun 子进程会变孤儿
-
-**症状**：任务管理器结束 `r5-server-gui.exe`（或宿主崩溃）后，`bun r5-server-gui.js` 一直挂着，
-累积几十个进程，每个都占着内存与协议管道。
-
-**做法**：子进程自己盯父进程（`desktop/src/app.tsx` 的 `watchHostProcess`）：每 2 秒
-`process.kill(ppid, 0)`，父进程没了就 `exit(0)`。
-引擎（`r5apex_ds.exe`）与日志守护是 `Bun.spawn({ detached: true })` 起的，不受影响 —— **关掉面板不会带走正在跑的服务器**。
-
----
-
-## 10. 图标名是白名单
-
-`Icon` 的 `name` 只能取 `packages/solid-gpui/src/protocol/types.ts` 里 `ICON_NAMES` 列出的值，
-写错就是一条 `TS2322`（例如 `lucide:wrench`、`lucide:rotate-cw` 都不在表里；用 `lucide:refresh-cw`）。
-
----
-
-## 调试这些问题的常用手法（本机有效）
-
-- 崩溃先看子进程 stderr：宿主会把 `renderer runtime terminated unexpectedly` 与 JS 的异常栈打出来。
-- 「窗口变白」几乎都是**提交被拒**：宿主 stderr 会写 `rejected renderer commit: ...` 与具体原因，照那句话去 Rust 源码里搜。
-- 验证不用真鼠标：`PrintWindow(hwnd, dc, 2)` 能抓到被遮挡的窗口（不抢前台、不动光标）。
-- 起始页面可以通过 `r5-server.json` 的 `panelRoute` 指定，重启即进对应页面 —— 逐页截图验证不需要任何输入。
+[stack]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/crates/solid-gpui/src/host/launch.rs#L21-L65
+[json]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/packages/solid-gpui/src/native.ts#L80-L103
+[choices]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/crates/solid-gpui/src/components/choices.rs#L284-L323
+[application]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/packages/solid-gpui/src/application.ts#L142-L200
+[catalog]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/packages/solid-gpui-vite/src/native-export.ts
+[font]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/vendor/gpui-windows/src/direct_write.rs#L1888-L1925
+[scroll]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/docs/scroll-performance.md
+[runtime]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/packages/solid-gpui/src/runtime.ts#L55-L124
+[stdio]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/packages/solid-gpui/src/stdio.ts#L114-L284
+[icons]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/docs/iconify.md
+[table]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/vendor/gpui-kit/crates/component/src/table/table.rs#L494-L509
+[ack]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/packages/solid-gpui/src/native.ts#L206-L214
+[perf]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/docs/performance-analysis.md
+[list-adapter]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/vendor/gpui-kit/crates/component/src/searchable_list/adapter.rs#L113-L155
+[list-item]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/vendor/gpui-kit/crates/component/src/searchable_list/item.rs#L96-L138
+[router-vite]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/packages/solid-gpui-router/src/vite.ts#L1-L6
+[verification]: https://github.com/Cyenoch/solid-gpui/blob/fbd73f66d54d0725d1c901a7cfc358d1a367d676/.scratch/desktop-app/verification.md

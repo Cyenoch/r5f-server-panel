@@ -89,7 +89,7 @@
 
 `r5-server.exe` 只是启动器（编译产物，无运行时依赖）；真正的界面是一个原生宿主 `r5-server-gui.exe` 加它的 Bun 子进程 `r5-server-gui.js`。三者必须在同一目录 —— 打包发布时一起带上，源码构建时由 `bun run --cwd desktop stage` 摆好。
 
-宿主进程被强杀（任务管理器、崩溃）时子进程会自己退出：它每 2 秒探测一次父进程，父进程没了就 `exit`。所以**不会留下孤儿 Bun 进程**，也不需要手工清理。反过来，面板启动的游戏服务器与日志守护是 `detached` 进程，**关掉面板不会带走正在跑的服务器**。
+宿主进程被强杀（任务管理器、崩溃）时，上游默认 `StdioTransport` 会随宿主管道的 EOF 或读错误退出渲染器，不再由应用定时探测父进程。面板启动的游戏服务器与日志守护是 `detached` 进程，**关掉面板不会带走正在跑的服务器**。
 
 ## 命令参考
 
@@ -364,6 +364,63 @@ bun update --latest            # 依赖升到最新（受下面那条 24 小时�
 
 依赖一律取最新，但**只装发布满 24 小时**的版本：根目录 [`bunfig.toml`](bunfig.toml) 设了 `install.minimumReleaseAge = 86400`，`bun install` / `bun add` / `bun update` 都会过滤掉当天刚发布的版本，没有豁免名单。因此 `bun update --latest` 有时会**退**到上一个合规版本（比如当天刚发的 oxlint 要等满一天才装得上），第二天重跑一次即可跟上。
 
+### macOS 本地开发（模拟服务器）
+
+不需要下载 Windows 服务端，也不需要 Wine。运行的是同一个 **Solid GPUI 原生面板**，
+只把引擎进程与 Windows 主机能力换成本地模拟实现；`src/panel.ts`、设置/档案、文件解析、
+TCP 控制通道和日志读取仍走正常代码。窗口标题和所有页面的顶部都会标明「模拟」。
+
+首次准备：安装 Bun、Rust/rustup 和完整 Xcode；Xcode 需要 **Metal Toolchain**，仅装命令行工具不够。
+
+```sh
+git submodule update --init --recursive
+bun install
+xcodebuild -downloadComponent MetalToolchain  # 未安装时执行，GPUI 编译着色器需要它
+bun run gui:dev                              # 原生窗口 + Vite 热重载 + 模拟后端
+```
+
+在窗口里点「启动服务器」，即可看到两个模拟真人与一个机器人、实时日志和模拟运行指标。
+首启自动生成两份微型版本夹具（`1.0.13-dev` / `1.0.14-dev`），可以测试版本切换、升级备份。
+也可以从另一个终端操作同一份实例：
+
+```sh
+bun run dev:cli start
+bun run dev:cli players --json
+bun run dev:cli bots add --name ProbeBot
+bun run dev:cli mode set fs_dm
+bun run dev:cli announce on
+bun run dev:cli stop
+```
+
+**隔离与持久化：**两个入口都显式设置 `R5F_DEV=1`。数据只写到仓库的 `.dev/r5f/`
+（若宿主声明了 `R5_SERVER_ROOT`，则在它下面的 `.dev/r5f/`），已加入忽略规则。
+状态、档案、公告、主机配置、名单、备份和日志跨进程保留；夹具只补缺失文件，不覆盖编辑。
+重启模拟引擎会重新生成初始玩家。关闭面板不会停止模拟引擎；用面板停止按钮或 `dev:cli stop` 停止。
+要恢复全新数据，先关闭开发窗口并停止实例，再删除 `.dev/r5f/`，下次运行会重建。
+原有 `bun run gui` / `bun run dev` 不自动开启模拟，Windows 的真实服务端流程不变。
+
+**场景控制：**以下命令可以在面板控制台直接输入，也可以用 `bun run dev:cli console '<命令>'`：
+
+| 命令             | 效果                                                                   |
+| ---------------- | ---------------------------------------------------------------------- |
+| `dev_empty`      | 清空玩家，验证空态                                                     |
+| `dev_fill`       | 填满到 60 人，验证列表与满员状态                                       |
+| `dev_error`      | 写入本次模拟错误记录，验证体检异常                                     |
+| `dev_recover`    | 清除模拟错误和断连计数                                                 |
+| `dev_disconnect` | 断开下一次控制连接，验证错误反馈；后续连接恢复（可能被面板轮询先消费） |
+
+可以开发的流程包括：启动/停止/重启、版本、配置档案、设置与 cfg 同步、玩家/机器人、
+踢人/封禁/解封回执与本地台账、模式/地图、公告编辑与轮播开关读回、日志、健康、主机配置反馈。
+
+**不是引擎兼容性验证：**地图/模式清单、CPU/内存/端口状态和玩家都是模拟数据；不会绑定真实游戏 UDP、
+连接 Spire、上传统计、发送真人聊天或运行游戏脚本。封禁名单使用明确标注的模拟结构，不模拟登录封禁。
+Windows 防火墙、页面文件、Defender、电源与自启只读写模拟状态，不修改 macOS；
+`autostart run` 明确返回不支持。仅支持一个后台托管实例，不支持 `--foreground`、`--no-host` 或强制多开。
+真实引擎命令覆盖有限，未实现的控制台能力、自动到期解封和真实联网行为仍需在 Windows 验证。
+
+模拟实现集中在 `src/dev.ts`（开关与目录）、`dev-fixtures.ts`（夹具）、`dev-engine.ts`（进程/控制台）、
+`dev-protocol.ts`（实例身份与鉴权停止）、`dev-host.ts`（主机状态）。不要在页面里再造一套假数据。
+
 源码结构（`src/`）：逻辑层，CLI 与面板共用
 
 | 文件                 | 职责                                                                                 |
@@ -390,24 +447,25 @@ bun update --latest            # 依赖升到最新（受下面那条 24 小时�
 ```powershell
 bun install
 bun run gui:stage              # 构建 bundle + 编译宿主 + 把 exe/js 摆到仓库根
-.
-5-server-gui.exe --production
+.\r5-server-gui.exe --production
 
 # 日常开发（Vite 自带宿主进程与热重载）
 bun run gui
 ```
 
-需要 Rust 工具链（`rust-toolchain.toml` 指定版本，cargo 会自动拉）。`desktop/src/generated/native.ts` 与 `desktop/src/routeTree.gen.ts` 都是构建产物，不入库，`gui`/`gui:stage` 会自动生成。
+需要 Rust 工具链（`desktop/rust-toolchain.toml` 指定版本，覆盖 Vite 与 native 两种构建入口，cargo 会自动拉）。`desktop/src/generated/native.ts` 与 `desktop/src/routeTree.gen.ts` 都是构建产物，不入库，`gui`/`gui:stage` 会自动生成。
 
-踩过的坑与绕法（栈溢出、`Select` 校验、嵌套 `undefined` 打死渲染器、滚动区塌陷、子进程孤儿……）都记在
-[docs/solid-gpui-notes.md](docs/solid-gpui-notes.md)，每条都有症状、证据与做法。
+当前 solid-gpui 子模块 pin 为 `fbd73f6`。历史痛点的修复状态、已删除的临时绕法、仍需上游处理的问题与验证范围见
+[docs/solid-gpui-notes.md](docs/solid-gpui-notes.md)。
 
-两个平台注意点（都在 `desktop/native/src/main.rs` 里写了原因）：
+平台与产品取舍：
 
-- 应用跑在一个自建的大栈线程上。本 pin 的 vendored gpui 在 Windows 上会走出深递归，默认 1 MiB 主线程栈不够（表现为 `thread 'main' has overflowed its stack`）。
-- 关掉了装饰性动画（`motion::set(Reduced)`）：同样的动画路径在 `Button`/`TabBar` 这类控件上必崩，运维面板也不需要动效。
+- 应用线程由上游 runner 管理：Windows 默认预留 16 MiB 栈，可用 `SOLID_GPUI_APP_STACK_BYTES` 指定字节数；macOS 保持 AppKit 所需的主线程。本面板过去只验证过 Windows 的 256 MiB，升级后的 16 MiB 仍需在目标 Windows 环境做压力验证，不能把上游示例通过当作本面板通过。
+- `.SystemUIFont` 的 Windows 字体解析已由上游修复，宿主不再覆盖成指定字族。
+- 保留 `motion::set(Reduced)` 是运维面板的产品取舍，不再声称 `Button` / `TabBar` 必崩；首帧配置通过 `ComponentHost::with_initialize` 完成。
+- 占剩余空间的容器（外壳内容区、页面里靠 `flexGrow` 撑开的列）必须同时给出零初始尺寸（横向 `width: 0`、纵向 `height: 0`），否则布局引擎会先按内容测一遍整棵子树，长页面滚动会明显变卡。[实测](docs/solid-gpui-notes.md#已修复高内容页面滚动卡顿用户已于-2026-09-16-确认)
 
-面板的 Bun 子进程会盯着父进程，宿主被强杀（崩溃/任务管理器）时自己退出，不留孤儿进程；而它启动的游戏服务器与日志守护是 `detached` 进程，关掉面板不会带走正在跑的服务器。
+默认 stdio 传输负责渲染器随宿主退出；游戏服务器与日志守护仍独立存活。
 
 提交前跑完整闸门（oxlint 规则 + 类型诊断 + oxfmt 格式，`denyWarnings` 打开，有 warning 也算不过）：
 

@@ -4,15 +4,21 @@
  * 只放**跨页面复用**的东西；一个页面只用到一次的排版留在页里。
  * 颜色一律走 `lib/theme`。
  *
- * 两条硬约束（都是实测出来的，别改回去）：
- *  1. 条件与列表只用 `? :` 与 `.map()`，不用 `solid-js` 的 `For`/`Show`
- *     （返回值类型与 `@solid-gpui/core/jsx-runtime` 对不上，自己包一层会把渲染器带进未定义行为）。
- *  2. 按钮自己用 `Pressable` 拼，不用 gpui-component 的 `Button`
- *     —— 后者在本机（Windows + 本 pin 的 vendored gpui）必然栈溢出。
- *     同理不用 `TabBar`/`Tab`；`Sidebar`/`Dialog`/`Table`/`List`/`Select`/`Tooltip`/
- *     `MessageScroller`/`Input`/`Switch`/`Slider`/`Tag`/`Badge`/`Checkbox`/`Empty` 均已实测可用。
+ * 布局与文字的硬约束（渲染器的规矩，别改回去）：
+ *  1. 控件里的文字必须包 `<Text>`：渲染器规定裸文本只能直接挂在 `Text` 之下。
+ *  2. 每一层容器都要显式 `flexDirection`（默认是 `row`）；要撑满剩余高度用
+ *     `height: 0 + flexGrow: 1 + minHeight: 0`，滚动内容保持 `flexShrink: 0`。
+ *     详见下方 `PageScroll`。
+ *  3. 未知 prop 直接抛 `Unknown native prop`。
  *
- * 控件里的文字必须包 `<Text>`：渲染器规定裸文本只能直接挂在 `Text` 之下。
+ * 早先的两条"禁用清单"已作废：`For`/`Show` 等控制流现由 `@solid-gpui/core/runtime`
+ * 按原生子节点类型导出（原来是 `solid-js` 的类型对不上），带动画的 `Button`/`Tab` 也不再
+ * 因为栈深被禁 —— Windows 的应用线程栈已交给宿主入口点（默认 16 MiB）。见
+ * `docs/solid-gpui-notes.md` 第 1、8 条。
+ *
+ * `Action` 仍然只用 `Pressable` + `Icon` + `Text` 拼：产品要的是 solid/outline/ghost 三档
+ * 与 `tone` 配色（含对比度修过的 hover 底色），换成 gpui-component 的 `Button` 等于重做主题 ——
+ * 是设计选择，不是绕开故障。
  */
 import { Icon, Pressable, Text, View, type IconName, type SolidChild } from "@solid-gpui/core";
 import { Dialog, Scrollable, Separator, Tag } from "@solid-gpui/core/components";
@@ -70,6 +76,8 @@ export type ActionVariant = "solid" | "outline" | "ghost";
 /**
  * 按钮：`Pressable` + `Icon` + `Text`。
  * `solid` = 实心（主操作）、`outline` = 描边（次操作）、`ghost` = 只有文字（表格里/工具条里）。
+ *
+ * 显式提供无障碍名称与 Enter/Space 激活；禁用时同时移除焦点与键盘处理器。
  */
 export function Action(props: {
   label?: string;
@@ -98,6 +106,17 @@ export function Action(props: {
     <Pressable
       disabled={props.disabled}
       tooltip={props.tooltip}
+      // 图标按钮没有可见文字（`shell.tsx` 的收起/展开就是），退回 tooltip 也总比无名强。
+      accessibilityLabel={props.label ?? props.tooltip}
+      accessibilityDisabled={props.disabled}
+      focusable={!props.disabled}
+      onKeyDown={
+        props.disabled
+          ? undefined
+          : (event) => {
+              if (event.action === "down" && (event.key === "enter" || event.key === "space")) props.onPress();
+            }
+      }
       onHoverChange={(value: boolean) => setHover(value)}
       onPress={() => {
         if (!props.disabled) props.onPress();

@@ -226,8 +226,12 @@ function createSession() {
   }
 
   async function stopServer(all = false): Promise<void> {
-    await run("停止服务器", () => api.killInstance(state(), all));
-    notice("info", "已停止");
+    // `killInstance` 停不下来时**抛错**（实例记录保留，可以重试），`run` 会把它变成一条
+    // error notice —— 这种情况下不能再补一句「已停止」，否则界面上会同时出现互相矛盾的两条。
+    const result = await run("停止服务器", () => api.killInstance(state(), all));
+    if (result === undefined) return;
+    // 与 CLI 的 `cmdStop` 同一套话术：0 个 = 本来就没在跑。
+    notice("info", result > 0 ? `已停止 ${result} 个进程` : "没有正在运行的实例");
     await refreshState();
     await refreshFast();
   }

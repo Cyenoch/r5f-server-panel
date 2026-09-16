@@ -10,13 +10,15 @@
   "scripts": {
     "build": "bun build --compile --minify --target=bun-windows-x64 ./src/cli.tsx --outfile r5-server.exe",
     "dev": "bun run --hot ./src/cli.tsx",
+    "dev:cli": "R5F_DEV=1 bun run ./src/cli.tsx",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "typecheck": "oxlint --type-check",
-    "fmt": "oxfmt",
-    "fmt:check": "oxfmt --check",
+    "fmt": "oxfmt --disable-nested-config",
+    "fmt:check": "oxfmt --disable-nested-config --check",
     "check": "bun run typecheck && bun run fmt:check",
     "gui": "bun run --cwd desktop dev",
+    "gui:dev": "R5F_DEV=1 bun run --cwd desktop dev",
     "gui:build": "bun run --cwd desktop build",
     "gui:stage": "bun run --cwd desktop stage"
   },

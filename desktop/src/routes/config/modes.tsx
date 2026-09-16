@@ -7,9 +7,9 @@ import type { FieldId } from "@server/settings-fields";
  * 「设为启动模式」写设置（重启后生效）、「立即切换」走控制通道（只对跑着的实例有意义）。
  */
 import { Text, View, type SolidChild } from "@solid-gpui/core";
+import { Select } from "@solid-gpui/core/components";
 import { createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Select } from "../../components/controls";
 import { Action, Card, Chip, EmptyHint, Note, PageHeader, PageScroll } from "../../components/ui";
 import { session } from "../../lib/session";
 import { font, fontSize, palette, radius, space } from "../../lib/theme";

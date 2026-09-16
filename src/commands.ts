@@ -23,6 +23,8 @@ import stringWidth from "string-width";
 import { type Announcement, collectAnnouncements, renderAnnouncements, validateAnnouncement } from "./announcements";
 import { type ModeEntry, type ModeFamily, collectModes, mapsForPlaylist } from "./catalog";
 import { type CfgSync, syncLaunchSettings } from "./cfg";
+import { DEV_MODE } from "./dev";
+import { autostartDevHost, setupDevHost } from "./dev-host";
 import { type Section, type Tone, collectDetail, collectDoctor, collectHealth } from "./inspect";
 import {
   type ModerationEntry,
@@ -374,6 +376,10 @@ export async function startInstance(
   if (!version) return { ok: false, error: "没有选定版本目录。" };
 
   const settings = effectiveSettings(state, opts);
+  // 开发模式（R5F_DEV=1）走本机模拟引擎：真实路径要的 exe / 日志守护 / 游戏端口
+  // 在 macOS 上都不存在，但设置同步、runtime 记录、日志分片与保留策略完全一致。
+  if (DEV_MODE) return startDevInstance(state, version, settings, opts, report);
+
   const alive = runningProcessesFor(version.path);
   if (alive.length > 0 && !opts.force) {
     return {
@@ -515,8 +521,178 @@ export async function startInstance(
   };
 }
 
+/**
+ * 开发模式（R5F_DEV=1）的启动：拉起本机模拟引擎（隐藏命令 `__dev-engine`），
+ * 返回与真实路径**同形**的 `StartOutcome`。
+ *
+ * 与真实路径的差别只有「子进程是谁」：设置同步、runtime 记录、日志分片与保留策略
+ * 都复用同一批 helper，所以 CLI 与面板看到的数据形状不变。两处刻意的不同：
+ *  - 模拟引擎**自己**就是日志写入方（不再另起 `__logd`），因此不设 `runtime.logdPid`；
+ *  - 只允许一个模拟实例：`--force` 也不会多开（快照 / 控制端口 / 分片都假定独占）。
+ */
+async function startDevInstance(
+  state: State,
+  version: VersionInfo,
+  settings: Settings,
+  opts: StartOptions,
+  report: (line: string) => void,
+): Promise<StartOutcome> {
+  if (opts.foreground) {
+    return {
+      ok: false,
+      error: "开发模拟不支持前台模式。",
+      hint: "去掉 --foreground：模拟引擎本身就是一个后台子进程，Ctrl+C 收不到它的输出。",
+    };
+  }
+  if (opts.hosted === false) {
+    return {
+      ok: false,
+      error: "开发模拟不支持 --no-host。",
+      hint: "去掉 --no-host：模拟引擎本身就是托管控制台（日志 + 命令回执都走它）。",
+    };
+  }
+
+  const alive = win.findDediProcesses();
+  if (alive.length > 0) {
+    return {
+      ok: false,
+      error: `模拟实例已在运行（pid ${alive.map((p) => p.pid).join(", ")}）。`,
+      hint: "先停止：r5-server stop   或重启：r5-server restart（--force 也不会多开一个模拟实例）",
+    };
+  }
+  if (win.portInUse(settings.port)) {
+    return { ok: false, error: `UDP ${settings.port} 已被模拟实例占用。`, hint: "换端口：start --port 37016" };
+  }
+
+  const warnings = ["开发模式（R5F_DEV=1）：本机模拟实例，没有真实游戏端口，也没有对外连接。"];
+
+  // autoexec_server.cfg runs after the launch arguments: rewrite the cvars it
+  // shares with the panel so the panel's values are the effective ones.
+  const synced = syncLaunchSettings(version.path, settings);
+
+  logDir(ROOT);
+  const logFile = join(logDir(ROOT), logShardName(version.name, settings.port, new Date()));
+  const ctlToken = randomUUID().replace(/-/g, "");
+  // 引擎的 stderr 写进沙箱文件，而不是继承本进程的 stderr：模拟引擎比启动它的
+  // CLI 活得久，继承出去的 fd 会让调用方的 `stdout/stderr` 管道永远等不到 EOF
+  // （面板的 runCli 就会卡死）。文件里的最后几行就是启动失败的原因。
+  const errLog = join(ROOT, "dev-engine.stderr.log");
+  const errFd = openSync(errLog, "a");
+
+  let child: Bun.Subprocess<"ignore", "pipe", number>;
+  try {
+    child = Bun.spawn({
+      cmd: selfCommand([
+        "__dev-engine",
+        "--version-path",
+        version.path,
+        "--settings",
+        JSON.stringify(settings),
+        "--log",
+        logFile,
+        "--ctl-token",
+        ctlToken,
+      ]),
+      cwd: ROOT,
+      env: process.env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: errFd,
+      detached: true,
+    });
+  } finally {
+    closeSync(errFd); // 子进程自己有那份 fd
+  }
+  const { ready, ctlPort } = await waitForReady(child.stdout, 8000);
+  if (!ready || ctlPort <= 0) {
+    // 刚 spawn 出来的子进程：pid 是我们自己的，kill 它是安全的（不是快照里那个可能被复用的 pid）。
+    try {
+      child.kill();
+    } catch {
+      /* already gone */
+    }
+    await child.exited;
+    return {
+      ok: false,
+      error: "模拟引擎没有在 8 秒内就绪。",
+      hint: `引擎自己的报错在 ${errLog}；确认沙箱目录可写、端口未被占用，然后重试。`,
+    };
+  }
+  child.unref();
+
+  report("等待模拟实例就绪（本机进程，几乎立即）...");
+  // 模拟引擎在说 READY **之前**就写好了快照（dev-engine 的顺序契约），所以这里按
+  // 我们刚 spawn 的 pid 直接读它的进程事实 —— 比"在版本目录下找新进程"更精确，
+  // 也不受路径符号链接影响。
+  const proc = win.getProcess(child.pid);
+  if (!proc) {
+    try {
+      child.kill();
+    } catch {
+      /* already gone */
+    }
+    await child.exited;
+    return {
+      ok: false,
+      error: "模拟引擎已就绪，但实例快照读不出来（无 pid/端口，无法安全管理）。",
+      hint: `检查沙箱快照 ${join(ROOT, "dev-engine.json")} 是否可写。`,
+    };
+  }
+  const endpoints = win.udpEndpoints(proc.pid);
+  const bound = endpoints.some((endpoint) => endpoint.endsWith(`:${settings.port}`));
+
+  const previousRuntime = state.runtime;
+  const previousHistory = state.history.slice();
+  state.runtime = {
+    pid: proc.pid,
+    port: settings.port,
+    version: version.name,
+    startedAt: new Date().toISOString(),
+    // 模拟引擎自己写日志：不设 logdPid，停止路径才不会把它当成第二个进程再杀一次。
+    logFile,
+    ctlPort,
+    ctlToken,
+  };
+  record(state, "start", `[模拟] ${version.name} port=${settings.port} map=${settings.map} hosted=true`);
+  try {
+    saveState(state);
+  } catch (err) {
+    child.kill();
+    await child.exited;
+    state.runtime = previousRuntime;
+    state.history = previousHistory;
+    return { ok: false, error: `无法保存模拟实例：${err instanceof Error ? err.message : String(err)}` };
+  }
+  // 保留最近 N 次运行的分片（`logRetention` 是本机工具设置，不传给引擎）。
+  const failed = pruneLogShards(Math.max(1, state.settings.logRetention ?? 10), logFile);
+  if (failed.length > 0) warnings.push(`旧日志分片删除失败（不影响启动）：${failed.join(", ")}`);
+
+  return {
+    ok: true,
+    version: version.name,
+    versionPath: version.path,
+    pid: proc.pid,
+    port: settings.port,
+    workingSetMB: proc.workingSetMB,
+    privateMB: proc.privateMB,
+    endpoints,
+    title: proc.title,
+    settings,
+    logFile,
+    hosted: true,
+    bound,
+    synced,
+    warnings,
+  };
+}
+
 /** 前台模式（CLI 专属）：接管终端、Ctrl+C 结束，可选退出后自动重启。 */
 async function runForeground(state: State, opts: StartOptions): Promise<number> {
+  if (DEV_MODE) {
+    // 模拟引擎是后台子进程，前台"接管终端"在这里无从谈起：明说而不是假装接管。
+    console.log(red("开发模拟不支持前台模式：请用 r5-server start 起一个后台模拟实例。"));
+    return 1;
+  }
   const version = await ensureVersion(state, true);
   if (!version) return 1;
   const settings = effectiveSettings(state, opts);
@@ -563,39 +739,76 @@ export async function cmdStart(state: State, opts: StartOptions): Promise<number
     );
   }
   if (result.logFile) kv("本次日志", result.logFile);
-  console.log(green(`\n已启动：pid ${result.pid}`));
+  console.log(green(`\n已启动：pid ${result.pid}${DEV_MODE ? "（模拟）" : ""}`));
   kv("内存", `${result.workingSetMB} MB 工作集 / ${result.privateMB} MB 私有提交`);
   kv("监听 UDP", result.endpoints.join(", "));
   if (result.title) kv("窗口标题", result.title);
   if (!result.bound) {
     console.log(yellow(`  注意：进程在跑但 30 秒内没看到 UDP ${result.port} 绑定，稍后用 status 复查。`));
   }
-  console.log(dim(`  玩家加入：R5F launcher -> connect <公网IP>:${result.port}`));
+  if (DEV_MODE) {
+    kv("模拟沙箱", ROOT);
+    console.log(dim("  控制台 / 玩家 / 封禁全是本机模拟数据；没有真玩家能连进来。"));
+  } else {
+    console.log(dim(`  玩家加入：R5F launcher -> connect <公网IP>:${result.port}`));
+  }
   return 0;
 }
 
+/**
+ * 停止结果。`error` 非空表示实例**没有确认停止**：此时 runtime 记录保留（旧实例
+ * 仍然可停），调用方必须把它说出来 —— 悄悄清掉 runtime 会让面板失去"还能再停一次"
+ * 的能力。
+ */
+export type StopResult = { killed: number; error?: string };
+
 /** 停掉实例：进程树 + 日志守护；`all` 连本目录下其它实例一起停。 */
-export function stopInstance(state: State, opts: { all?: boolean } = {}): { killed: number } {
+export function stopInstance(state: State, opts: { all?: boolean } = {}): StopResult {
   let killed = 0;
+  let error: string | undefined;
+  const handled = new Set<number>();
   const runtime = state.runtime;
-  if (runtime?.pid) {
-    const info = win.getProcess(runtime.pid);
-    if (info) {
-      if (win.killTree(info.pid)) killed++;
+  const enginePid = runtime?.pid ?? 0;
+  const stopPid = (pid: number): boolean => {
+    if (handled.has(pid)) return false; // 同一个 pid 只停一次
+    handled.add(pid);
+    return win.killTree(pid);
+  };
+
+  if (enginePid > 0 && win.getProcess(enginePid)) {
+    // 开发模式下 `win.killTree` 走 `stopDevEngine`：起一个隐藏的 `__dev-stop <pid>`
+    // 子进程让模拟引擎**自己**收尾，绝不对可能已被系统复用的 OS pid 发信号。
+    if (!stopPid(enginePid)) {
+      error = DEV_MODE
+        ? `模拟引擎没有确认停止（pid ${enginePid}）。实例记录已保留，可以重试 stop。`
+        : `实例进程没有确认停止（pid ${enginePid}）。实例记录已保留，可以重试 stop。`;
+    } else {
+      killed += 1;
     }
   }
-  if (runtime?.logdPid && isPidAlive(runtime.logdPid)) {
+
+  const logd = runtime?.logdPid ?? 0;
+  // 模拟引擎自己就是日志守护（启动时不设 logdPid）；开发模式下也绝不 `process.kill`
+  // 记录里的 pid —— 那个 pid 与我们无关，可能是别的进程。
+  if (!DEV_MODE && logd > 0 && logd !== enginePid && !handled.has(logd) && isPidAlive(logd)) {
     try {
-      process.kill(runtime.logdPid);
-      killed++;
+      process.kill(logd);
+      killed += 1;
     } catch {
       /* already gone */
     }
   }
+
   if (opts.all) {
     for (const p of win.findDediProcesses()) {
-      if (p.path.toLowerCase().startsWith(ROOT.toLowerCase()) && win.killTree(p.pid)) killed++;
+      if (p.path.toLowerCase().startsWith(ROOT.toLowerCase()) && stopPid(p.pid)) killed += 1;
     }
+  }
+
+  if (error !== undefined) {
+    record(state, "stop", `failed: ${error}`);
+    saveState(state);
+    return { killed, error };
   }
   state.runtime = null;
   record(state, "stop", `killed=${killed}`);
@@ -604,7 +817,11 @@ export function stopInstance(state: State, opts: { all?: boolean } = {}): { kill
 }
 
 export function cmdStop(state: State, opts: { all?: boolean } = {}): number {
-  const { killed } = stopInstance(state, opts);
+  const { killed, error } = stopInstance(state, opts);
+  if (error !== undefined) {
+    console.log(red(error));
+    return 1;
+  }
   console.log(killed > 0 ? green(`已停止 ${killed} 个进程。`) : dim("没有正在运行的实例。"));
   return 0;
 }
@@ -723,7 +940,8 @@ export async function cmdUpgrade(state: State, opts: UpgradeOptions): Promise<nu
   }
 
   state.current = target.name;
-  state.runtime = null;
+  // runtime 不动：升级只换「用哪个版本」，正在跑的实例（含模拟实例）得留在记录里，
+  // 否则换版本之后那个进程既停不掉、又占着端口。
   record(state, "upgrade", `${current?.name ?? "none"} -> ${target.name} carry=${carry} backup=${stamp}`);
   saveState(state);
 
@@ -848,6 +1066,8 @@ function ensureScheduledTask(opts: SetupOptions): void {
 }
 
 export async function cmdSetup(state: State, opts: SetupOptions, rawArgs: string[]): Promise<number> {
+  // 开发模式：把勾选写进模拟主机状态文件（跨进程保留），一行 PowerShell 都不跑。
+  if (DEV_MODE) return setupDevHost(opts, state.settings.port);
   header("Windows 主机配置");
   if (!opts.dryRun && !win.isAdmin()) {
     console.log(yellow("需要管理员权限，正在通过 UAC 提权..."));
@@ -1098,6 +1318,8 @@ function taskCommandLine(extraArgs: string[]): string {
 }
 
 export async function cmdAutostart(state: State, opts: AutostartOptions, rawArgs: string[]): Promise<number> {
+  // 开发模式：计划任务只存在于模拟主机状态文件里（`run` 明确不支持：没有真任务可触发）。
+  if (DEV_MODE) return autostartDevHost(opts, state.settings.port);
   const taskName = opts.taskName ?? DEFAULT_TASK;
   header(`开机自启：${opts.action}`);
   if (opts.dryRun) {

@@ -10,10 +10,9 @@ import { MANUAL_OPTION, SETTINGS_FIELDS, type FieldDef } from "@server/settings-
  * 外壳的内容区不做滚动），两栏用 `flexDirection: "row"` + 左侧固定 320 + 右侧 `flexGrow: 1`。
  */
 import { Pressable, Text, View, type SolidChild } from "@solid-gpui/core";
-import { Input } from "@solid-gpui/core/components";
+import { Input, Select } from "@solid-gpui/core/components";
 import { createEffect, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Select } from "../../components/controls";
 import { Action, Card, Chip, Confirm, EmptyHint, Note, PageHeader, PageScroll } from "../../components/ui";
 import { formatRelative } from "../../lib/format";
 import { session } from "../../lib/session";
@@ -49,7 +48,7 @@ function FieldRow(props: { field: FieldDef }): SolidChild {
   const options = () =>
     props.field.options ? props.field.options({ catalog: store.catalog(), settings: store.settings() }) : [];
 
-  /** 选择项：key 去重（模式/地图清单可能重复声明），空值换成哨兵 key。 */
+  /** 选择项：key 去重（原生要求分组/条目 key 非空且唯一，而模式/地图清单可能重复声明），空值换成哨兵 key。 */
   const items = (): { key: string; label: string; description: string | undefined }[] => {
     const seen = new Set<string>();
     const list: { key: string; label: string; description: string | undefined }[] = [];
@@ -62,12 +61,6 @@ function FieldRow(props: { field: FieldDef }): SolidChild {
     return list;
   };
 
-  /** 当前值不在清单里（比如手填过自定义值）时不传 `value`，否则原生 Select 会拒绝渲染。 */
-  const selectedKey = (): string | undefined => {
-    const key = keyOfValue(text());
-    return items().some((item) => item.key === key) ? key : undefined;
-  };
-
   const warning = (): SolidChild => {
     const message = props.field.warn ? props.field.warn(store.settings()) : null;
     return message ? <Note tone="warning" text={message} /> : null;
@@ -75,10 +68,14 @@ function FieldRow(props: { field: FieldDef }): SolidChild {
 
   const editor = (): SolidChild => {
     if (props.field.options !== undefined && !manual()) {
+      // 当前值原样交给原生 `Select`，**不**因为"值不在清单里"就撤掉 `value`：清单是异步读来的、
+      // 值还可能是手填的，两者对不上是常态。原生层把这种受控值保留为"未解析"（不选中、不显示），
+      // 既不拒绝整个提交，也不会因为清单晚到而抹掉应用状态（上游 docs/gpui-components.md
+      // 的 "Asynchronous choice catalogs"）。
       return (
         <Select
           items={[{ key: props.field.id, items: items() }]}
-          value={selectedKey()}
+          value={keyOfValue(text())}
           placeholder="当前值不在清单里"
           size="small"
           onChange={(change) => {
@@ -126,6 +123,7 @@ function FieldRow(props: { field: FieldDef }): SolidChild {
         <Text style={{ fontSize: fontSize.lg, fontWeight: "semibold", color: palette.text }}>{props.field.label}</Text>
         <Text
           style={{
+            width: 0,
             flexGrow: 1,
             minWidth: 0,
             fontSize: fontSize.md,
@@ -141,7 +139,7 @@ function FieldRow(props: { field: FieldDef }): SolidChild {
         {`允许值：${props.field.spec}　|　改了什么时候生效：${props.field.scope}`}
       </Text>
       <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm, minWidth: 0 }}>
-        <View style={{ flexGrow: 1, minWidth: 220 }}>{editor()}</View>
+        <View style={{ width: 0, flexGrow: 1, minWidth: 220 }}>{editor()}</View>
         <Action
           label="保存"
           icon="lucide:check"
@@ -307,7 +305,7 @@ function Page(): SolidChild {
           </Card>
         </View>
 
-        <View style={{ flexGrow: 1, minWidth: 0, gap: space.lg }}>
+        <View style={{ width: 0, flexGrow: 1, minWidth: 0, gap: space.lg }}>
           <Card
             title="启动设置"
             icon="lucide:sliders-horizontal"

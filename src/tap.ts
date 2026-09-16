@@ -280,7 +280,12 @@ export function selfCommand(extraArgs: string[]): string[] {
  *
  * 从 `r5-server.exe` 或 `bun run src/cli.tsx` 自己启动时看 `process.execPath` 就够；
  * 但桌面端的宿主进程是 GUI，`process.argv[1]` 是面板 JS 而不是 CLI，所以宿主用
- * `R5_SERVER_DAEMON`（JSON 数组）显式告诉子进程该跑什么。
+ * `R5_SERVER_DAEMON`（JSON 数组）显式告诉子进程该跑什么 —— 那段前缀必须原样保留。
+ *
+ * Bun 的可执行名不止 `bun` / `bun.exe`：本机（vite-plus 装的 Bun）叫 `bun.native`。
+ * 少认一个名字，`run <script>` 就会漏掉，子进程会把参数当脚本名去找
+ * （`error: Script not found "__dev-engine"`）。名字逐个精确匹配：编译产物也叫
+ * 别的名字，宽前缀会把它们错当解释器。
  */
 function daemonPrefix(): string[] {
   const configured = process.env.R5_SERVER_DAEMON;
@@ -296,7 +301,7 @@ function daemonPrefix(): string[] {
   }
   const exe = process.execPath;
   const leaf = exe.split(/[\\/]/).pop()?.toLowerCase() ?? "";
-  if (leaf === "bun.exe" || leaf === "bun") {
+  if (leaf === "bun" || leaf === "bun.exe" || leaf === "bun.native") {
     const script = process.argv[1];
     if (script && existsSync(script)) return [exe, "run", script];
   }

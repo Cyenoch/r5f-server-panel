@@ -6,9 +6,9 @@
  * 其余各层都显式写了 `flexDirection` / `minWidth: 0` / `minHeight: 0`。
  */
 import { Text, TextInput, View, type SolidChild } from "@solid-gpui/core";
+import { Select } from "@solid-gpui/core/components";
 import { createMemo, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import { Select } from "../../components/controls";
 import { Action, Note, PageHeader, Toolbar } from "../../components/ui";
 import { formatBytes, formatRelative } from "../../lib/format";
 import { session, type NoticeKind } from "../../lib/session";

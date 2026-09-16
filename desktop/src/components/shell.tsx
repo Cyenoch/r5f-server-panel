@@ -1,3 +1,4 @@
+import { DEV_MODE } from "@server/panel";
 /**
  * 应用外壳：标题栏 + 左侧导航 + 右侧内容区 + 状态栏 + 动作记录。
  *
@@ -5,8 +6,8 @@
  * 从窗口根到滚动容器，每一层都要显式 `flexDirection`、`minWidth: 0`、`minHeight: 0`，
  * 滚动的那一层用 `height: 0 + flexGrow: 1`。
  *
- * 条件与列表用 `? :` 与 `.map()`；按钮用 `Action`（不碰 gpui-component 的 Button）——
- * 原因见 `components/ui.tsx` 开头的两条硬约束。
+ * 条件与列表用 `? :` 与 `.map()`；按钮用 `Action`（面板自有一套 tone/hover 配色）——
+ * 渲染器侧的约束见 `components/ui.tsx` 开头。
  */
 import { Icon, Pressable, Text, View, type SolidChild } from "@solid-gpui/core";
 import {
@@ -22,7 +23,7 @@ import {
 } from "@solid-gpui/core/components";
 import { createEffect, createMemo, createSignal } from "@solid-gpui/core/runtime";
 import { Outlet, useLocation, useNavigate } from "@solid-gpui/router";
-import { Action } from "../components/ui";
+import { Action, Chip } from "../components/ui";
 import { formatRelative } from "../lib/format";
 import { setWindowTitle } from "../lib/host";
 import { NAV, navGroupFor, navItemFor } from "../lib/nav";
@@ -108,7 +109,10 @@ export function Shell(): SolidChild {
   });
   createEffect(() => {
     const metrics = instance();
-    setWindowTitle(`R5Flowstate 服务器管理 — ${metrics?.alive ? `运行中 · UDP ${metrics.port}` : "未运行"}`);
+    const status = metrics?.alive ? `运行中 · UDP ${metrics.port}` : "未运行";
+    // 开发模式（R5F_DEV=1）下的数据全是本机假实现，标题必须自己说出来：截图、录屏、
+    // 任务栏预览里都能看出这不是一台真服务器。
+    setWindowTitle(`${DEV_MODE ? "[模拟] " : ""}R5Flowstate 服务器管理 — ${status}`);
   });
 
   return (
@@ -128,6 +132,11 @@ export function Shell(): SolidChild {
         <View style={{ flexDirection: "row", alignItems: "center", gap: space.md, flexGrow: 1, minWidth: 0 }}>
           <Icon name="lucide:zap" size={16} color={palette.primary} />
           <Text style={{ fontSize: fontSize.md, fontWeight: "semibold", color: palette.text }}>R5Flowstate</Text>
+          {/*
+            开发模式（R5F_DEV=1）的常驻标记：外壳是所有页面的根布局，所以这一个徽标在
+            每一页上都看得见。数据来自 `src/dev-*` 的本机假实现，必须一眼能认出来。
+          */}
+          {DEV_MODE ? <Chip tone="warning" icon="lucide:triangle-alert" label="模拟数据" /> : null}
           {group() ? <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>{group()?.label}</Text> : null}
           {active() ? (
             <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs }}>
@@ -184,7 +193,7 @@ export function Shell(): SolidChild {
         </View>
       </TitleBar>
 
-      <View style={{ flexDirection: "row", flexGrow: 1, minHeight: 0, minWidth: 0 }}>
+      <View style={{ height: 0, flexDirection: "row", flexGrow: 1, minHeight: 0, minWidth: 0 }}>
         <Sidebar
           side="left"
           collapsed={collapsed()}
@@ -230,7 +239,7 @@ export function Shell(): SolidChild {
           ))}
         </Sidebar>
 
-        <View style={{ flexGrow: 1, minWidth: 0, minHeight: 0, flexDirection: "column" }}>
+        <View style={{ width: 0, flexGrow: 1, minWidth: 0, minHeight: 0, flexDirection: "column" }}>
           {/*
             页面槽位：`flexDirection: "column"` 不能省 —— 默认是 row，子节点的 `flexGrow`
             会去撑宽而不是撑高，页面里的 `height: 0 + flexGrow: 1` 滚动容器会塌成 0 高度。
