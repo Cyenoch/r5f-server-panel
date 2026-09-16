@@ -318,17 +318,14 @@ function Page(): SolidChild {
       {loading() ? (
         <Note text="正在读取公告文案…" />
       ) : failed() ? (
-        <Note
-          tone="danger"
-          text="读不到公告文案：这次读取失败了，原因见动作记录；也可以先去「服务器列表」选一个版本。"
-        />
+        <Note tone="danger" text="公告读取失败，请查看操作记录，并检查此实例选择的服务端版本与工作目录。" />
       ) : file() === null ? (
         <EmptyHint
           icon="lucide:folder-open"
-          title="还没有选服务器版本"
-          description="公告文案表跟着服务器文件走，先选一个版本再回来读。"
+          title="尚未读取到此实例的公告"
+          description="请先为实例选择有效版本；公告保存到实例私有工作目录，不修改共享版本。"
           action={
-            <Action label="去服务器列表" icon="lucide:layers" onPress={() => void navigate({ to: "/server/list" })} />
+            <Action label="实例设置" icon="lucide:settings" onPress={() => void navigate({ to: "/config/server" })} />
           }
         />
       ) : (

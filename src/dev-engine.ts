@@ -9,8 +9,8 @@
  * 三条硬规则：
  *   1. 只在 R5F_DEV=1 时可用；`--version-path` 与 `--log` 必须 realpath 落在 DEV_ROOT
  *      里（真实游戏目录永远不被写），`--ctl-token` 为空直接拒绝（绝不暴露无鉴权端口）。
- *   2. 只复现**实测过**的行为。实测存在的命令（`sv_cheats` 等）回一行"模拟器未实现"，
- *      绝不谎报 `Command 'x' doesn't exist`；没复现的效果也绝不装作成功。
+ *   2. 只复现**实测过**的行为。没复现的效果绝不装作成功；不复现的命令回引擎真正的
+ *      `Command 'x' doesn't exist` 原文，不编造第三种回答。
  *   3. 退出必须自己收尾：清定时器、关控制端口、删快照。启动失败同样先把已建的东西拆掉，
  *      不留悬挂进程/端口/文件。
  *
@@ -52,6 +52,10 @@ const HEARTBEAT_MS = 30_000;
 const HEARTBEAT_QUIET_MS = 15_000;
 /** 一行命令的字节上限；超了就回 ERR，不猜。 */
 const MAX_COMMAND_BYTES = 2048;
+/** 运行期 playlist 覆盖表的容量（真机上限未实测，这里用我们自己的；超了如实报错）。 */
+const MAX_PLO_NAME = 64;
+const MAX_PLO_VALUE = 256;
+const MAX_PLO_ENTRIES = 64;
 /** dev_disconnect 一次最多丢几个连接。 */
 const MAX_DROPS = 10;
 /** 同时挂着的控制连接上限（面板 + CLI + 几条在途命令都够用）。 */
@@ -72,7 +76,9 @@ const ERROR_SEED = [
 ].join("\n");
 
 export type DevEngineOptions = {
-  /** 模拟的版本目录（DEV_ROOT 里的 fixture 目录）。 */
+  /** 这个模拟实例属于哪个实例 id（决定快照文件名，也是"已有实例"判定的键）。 */
+  instance: string;
+  /** 模拟的版本目录（实例自己的引擎工作副本，落在 DEV_ROOT 里）。 */
   versionPath: string;
   /** 启动设置；模拟器只用 port/hostname/map/playlist。 */
   settings: Settings;
@@ -183,36 +189,41 @@ function coerceSettings(raw: Settings): Settings {
   };
 }
 
-type Prepared = { versionPath: string; logFile: string; settings: Settings };
+type Prepared = { instance: string; versionPath: string; logFile: string; settings: Settings };
 
 /**
- * 启动前置检查：dev 开关、令牌、路径沙箱、以及"是否已经有实例在跑"。
+ * 启动前置检查：dev 开关、令牌、路径沙箱、以及"**这个实例**是否已经有一个实例在跑"。
  * 任何一条不过都直接抛 StartError —— 此时一个字节也还没写出去。
+ *
+ * 判定只看本实例的快照：别的实例在跑是正常的（多实例就是目的），不是错误。
  */
 function prepare(opts: DevEngineOptions): Prepared {
   if (!DEV_MODE) throw new StartError("模拟引擎只在 R5F_DEV=1 时可用。", EXIT_USAGE);
+  if (!/^[a-z0-9-]{1,64}$/.test(opts.instance))
+    throw new StartError(`--instance 不合法：${JSON.stringify(opts.instance)}`, EXIT_USAGE);
   if (opts.ctlToken.length === 0)
     throw new StartError("缺少 --ctl-token：模拟实例不接受无鉴权的控制端口。", EXIT_USAGE);
   const root = realWithinRoot(DEV_ROOT, DEV_ROOT, "DEV_ROOT", EXIT_USAGE);
   const versionPath = realWithinRoot(opts.versionPath, root, "--version-path", EXIT_USAGE);
   const declaredLog = resolve(opts.logFile);
   // 不在沙箱里"替调用方建目录"：目录必须已经存在，且 realpath 落在 DEV_ROOT 里。
-  // （Main 的启动分支会先 logDir(ROOT) 建好它；这里多一步创建就等于往沙箱外写东西。）
+  // （启动分支会先 logDir(ROOT) 建好它；这里多一步创建就等于往沙箱外写东西。）
   const logDir = realWithinRoot(dirname(declaredLog), root, "--log 所在目录", EXIT_USAGE);
   const logFile = join(logDir, basename(declaredLog));
   if (existsSync(logFile)) realWithinRoot(logFile, root, "--log", EXIT_USAGE);
 
-  const live = readDevEngineSnapshot();
+  const live = readDevEngineSnapshot(opts.instance);
   if (live && live.pid !== process.pid && isPidAlive(live.pid)) {
     throw new StartError(
-      `已有模拟实例在运行（pid ${live.pid}，端口 ${live.port}）：先 r5-server stop，或 r5-server __dev-stop ${live.pid}`,
+      `实例 ${opts.instance} 的模拟引擎已在运行（pid ${live.pid}，端口 ${live.port}）：先 r5-server stop，或 r5-server __dev-stop ${live.pid}`,
       EXIT_INSTANCE,
     );
   }
-  return { versionPath, logFile, settings: coerceSettings(opts.settings) };
+  return { instance: opts.instance, versionPath, logFile, settings: coerceSettings(opts.settings) };
 }
 
 class DevEngine {
+  private readonly instance: string;
   private readonly versionPath: string;
   private readonly logFile: string;
   private readonly ctlToken: string;
@@ -241,8 +252,11 @@ class DevEngine {
   private finished = false;
   private snapshotWarned = false;
   private announceEnabled: string;
+  /** 运行期 playlist 覆盖表（`playlist_override_set`）。真机是"每个连接客户端都生效"的全局表。 */
+  private readonly playlistOverrides = new Map<string, string>();
 
   constructor(opts: DevEngineOptions, prepared: Prepared) {
+    this.instance = prepared.instance;
     this.versionPath = prepared.versionPath;
     this.settings = prepared.settings;
     this.announceEnabled = this.settings.announceRotate === "on" ? "1" : "0";
@@ -311,8 +325,8 @@ class DevEngine {
     this.server = null;
     for (const client of this.clients) client.destroy();
     this.clients.clear();
-    // 只删自己写的快照：别人的实例还在跑时，删掉它等于把它的身份弄丢。
-    if (this.snapshotWritten) removeDevEngineSnapshot();
+    // 只删自己写的快照：别的实例的快照不属于我们。
+    if (this.snapshotWritten) removeDevEngineSnapshot(this.instance);
   }
 
   // --------------------------------------------------------------- 控制通道
@@ -431,14 +445,14 @@ class DevEngine {
         }
         return;
       case "playlist_override_list":
-        // 实测静默：命令存在但无输出。
+        this.playlistOverrideList();
         return;
       case "playlist_override_set":
-        if (args.length < 2) {
-          this.log("usage: playlist_override_set <var> <value>");
-          return;
-        }
-        break;
+        this.playlistOverride(args);
+        return;
+      case "playlist_override_clear":
+        this.playlistOverrides.clear();
+        return;
       case "help":
         if (args.length === 0) {
           this.log("Usage:  help <cvarname>");
@@ -469,7 +483,6 @@ class DevEngine {
         this.unknownCommand(name);
         return;
     }
-    this.notSimulated(name);
   }
 
   /** 实测格式：`Command 'x' doesn't exist; request 'x' ignored`。 */
@@ -477,9 +490,48 @@ class DevEngine {
     this.log(`Command '${name}' doesn't exist; request '${name}' ignored`);
   }
 
-  /** 实测存在、本模拟器不复现的命令：如实说明，不谎报不存在，也不假装成功。 */
-  private notSimulated(name: string): void {
-    this.log(`dev-sim: '${name}' exists on the real engine but this simulated engine does not implement it`);
+  /**
+   * `playlist_override_set <var> <value>`：真机描述是 "Overrides a playlist var for every
+   * connected client"（server.dll），并且**实测静默** —— 一个字都不回，所以这里也不回。
+   *
+   * 格式串取自 server.dll（`[PLO] var name must be 1..%d characters` /
+   * `[PLO] value must be at most %d characters` / `[PLO] override table full (%d)`）；
+   * 上限的具体数值没有实测，这里用的是我们自己的容量，被拒时如实打印原文格式。
+   */
+  private playlistOverride(args: Token[]): void {
+    const key = args[0]?.text ?? "";
+    const value = args[1]?.text ?? "";
+    if (key.length === 0 || args.length < 2) {
+      this.log("usage: playlist_override_set <var> <value>");
+      return;
+    }
+    if (key.length > MAX_PLO_NAME) {
+      this.log(`[PLO] var name must be 1..${MAX_PLO_NAME} characters`);
+      return;
+    }
+    if (value.length > MAX_PLO_VALUE) {
+      this.log(`[PLO] value must be at most ${MAX_PLO_VALUE} characters`);
+      return;
+    }
+    if (!this.playlistOverrides.has(key) && this.playlistOverrides.size >= MAX_PLO_ENTRIES) {
+      this.log(`[PLO] override table full (${MAX_PLO_ENTRIES})`);
+      return;
+    }
+    this.playlistOverrides.set(key, value);
+  }
+
+  /**
+   * `playlist_override_list`：按 server.dll 的格式打印当前覆盖表
+   * （`[PLO] %d playlist var override(s):` + `[PLO]   %s = %s`）。
+   *
+   * 表为空时**静默**：实测那次就是"命令存在但无输出"，而当时表里一条都没有 ——
+   * 空表不打印两种证据都成立，非空表打印只有 dll 的格式串作依据（未实测）。
+   */
+  private playlistOverrideList(): void {
+    if (this.playlistOverrides.size === 0) return;
+    const lines = [`[PLO] ${this.playlistOverrides.size} playlist var override(s):`];
+    for (const [key, value] of this.playlistOverrides) lines.push(`[PLO]   ${key} = ${value}`);
+    this.log(lines.join("\n"));
   }
 
   private printStatus(): void {
@@ -796,6 +848,7 @@ class DevEngine {
     try {
       writeDevEngineSnapshot({
         pid: process.pid,
+        instance: this.instance,
         port: this.settings.port,
         versionPath: this.versionPath,
         startedAt: new Date(this.startedAt).toISOString(),

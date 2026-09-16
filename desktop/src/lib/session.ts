@@ -10,7 +10,7 @@ import type {
   ModeFamily,
   ModerationResult,
   PlayerRow,
-  ProfileRow,
+  ServerInstance,
   Receipt,
   Settings,
   StartOptions,
@@ -21,11 +21,12 @@ import type {
 import * as api from "@server/panel";
 import type { FieldId } from "@server/settings-fields";
 import { selfCommand } from "@server/tap";
+import { metricHistory, sampleFleet, type FleetRow } from "@server/telemetry";
 /**
  * 面板的会话状态：一份进程内单例，装着从磁盘与运行实例读来的数据，以及改动它们的动作。
  *
  * 取数分两档：
- *  - **快**（1.5 s）：实例进程指标、日志增量、玩家列表 —— 都是面板要"实时"的东西；
+ *  - **快**（3 s，无重叠）：实例进程指标、日志增量、选中实例玩家；每 10 s 留一份统计采样。
  *  - **慢**（按需）：主机体检、本次运行健康、版本目录体积 —— 每次要跑 PowerShell 或扫盘。
  *
  * 所有写操作都走 `src/panel.ts`（= CLI 同一套实现），成功/失败都落成一条 `notice`，
@@ -38,7 +39,7 @@ export type Notice = { id: number; kind: NoticeKind; title: string; detail?: str
 
 export type ConsoleEntry = { id: number; line: string; kind: NoticeKind; text: string; at: number };
 
-const FAST_INTERVAL = 1500;
+const FAST_INTERVAL = 3000;
 const SLOW_INTERVAL = 30_000;
 
 let noticeSeq = 1;
@@ -69,6 +70,9 @@ function createSession() {
   const [state, setState] = createSignal<State>(api.loadState());
   const [versions, setVersions] = createSignal<VersionInfo[]>([]);
   const [instance, setInstance] = createSignal<InstanceMetrics | null>(null);
+  const [fleet, setFleet] = createSignal<FleetRow[]>([]);
+  const [metricsRevision, setMetricsRevision] = createSignal(0);
+  const [refreshError, setRefreshError] = createSignal<string | null>(null);
   const [players, setPlayers] = createSignal<PlayerRow[]>([]);
   const [playersError, setPlayersError] = createSignal<string | null>(null);
   const [catalog, setCatalog] = createSignal<Catalog>({ maps: [], playlists: [], modes: [] });
@@ -89,6 +93,8 @@ function createSession() {
   let fastTimer: ReturnType<typeof setInterval> | undefined;
   let slowTimer: ReturnType<typeof setInterval> | undefined;
   let slowBusy = false;
+  let fastBusy = false;
+  let disposed = false;
 
   function notice(kind: NoticeKind, title: string, detail?: string): void {
     const entry: Notice = { id: noticeSeq++, kind, title, detail, at: Date.now() };
@@ -105,6 +111,7 @@ function createSession() {
 
   /** 动作成功/失败的统一出口：把 panel 抛的错也变成一条 notice，界面不必写 try/catch。 */
   async function run<T>(label: string, action: () => T | Promise<T>): Promise<T | undefined> {
+    if (busy() !== null) return undefined;
     setBusy(label);
     try {
       return await action();
@@ -136,23 +143,39 @@ function createSession() {
   async function refreshState(): Promise<void> {
     const next = api.loadState();
     setState(next);
-    bindLogReader(next.runtime?.logFile ?? null);
+    bindLogReader(api.selectedInstance(next)?.runtime?.logFile ?? null);
     setShards(api.listRunShards(next));
   }
 
   async function refreshFast(): Promise<void> {
-    const current = state();
-    const metrics = await api.collectInstance(current);
-    setInstance(metrics);
-    bindLogReader(current.runtime?.logFile ?? null);
-    pollLog();
-    if (metrics?.hosted) {
-      const result = await api.listPlayers(current);
-      setPlayers(result.players);
-      setPlayersError(result.error ?? null);
-    } else {
-      setPlayers([]);
-      setPlayersError(metrics ? "实例不是以托管控制台启动的，读不到玩家列表" : null);
+    if (fastBusy || disposed) return;
+    fastBusy = true;
+    try {
+      const current = api.loadState();
+      const selectedId = current.selectedInstanceId;
+      const rows = await api.collectFleet(current);
+      if (disposed) return;
+      setFleet(rows);
+      setRefreshError(null);
+      if (sampleFleet(rows)) setMetricsRevision((value) => value + 1);
+      if (selectedId !== state().selectedInstanceId) return;
+      const metrics = rows.find((row) => row.instance.id === selectedId)?.metrics ?? null;
+      setInstance(metrics);
+      if (following()) bindLogReader(api.selectedInstance(current)?.runtime?.logFile ?? null);
+      pollLog();
+      if (metrics?.alive && metrics.hosted) {
+        const result = await api.listPlayers(current);
+        if (selectedId !== state().selectedInstanceId || disposed) return;
+        setPlayers(result.players);
+        setPlayersError(result.error ?? null);
+      } else {
+        setPlayers([]);
+        setPlayersError(metrics?.alive ? "未连接托管控制台，无法读取玩家" : null);
+      }
+    } catch (err) {
+      setRefreshError(err instanceof Error ? err.message : String(err));
+    } finally {
+      fastBusy = false;
     }
   }
 
@@ -162,6 +185,12 @@ function createSession() {
 
   function refreshCatalog(): void {
     const current = state();
+    if (!api.selectedInstance(current)) {
+      setCatalog({ maps: [], playlists: [], modes: [] });
+      setFamilies([]);
+      setShards([]);
+      return;
+    }
     setCatalog(api.currentCatalog(current));
     void api.modeFamilies(current).then(setFamilies);
     setShards(api.listRunShards(current));
@@ -172,11 +201,19 @@ function createSession() {
     slowBusy = true;
     try {
       const current = state();
+      const id = current.selectedInstanceId;
+      if (!api.selectedInstance(current)) {
+        setHealth(null);
+        setCapabilities([]);
+        setHost(await api.hostFacts(current));
+        return;
+      }
       const [nextHealth, nextHost, nextCaps] = await Promise.all([
         api.health(current),
         api.hostFacts(current),
         api.capabilities(current),
       ]);
+      if (id !== state().selectedInstanceId || disposed) return;
       setHealth(nextHealth);
       setHost(nextHost);
       setCapabilities(nextCaps);
@@ -188,6 +225,7 @@ function createSession() {
   }
 
   function start(): void {
+    disposed = false;
     refreshVersions();
     refreshCatalog();
     void refreshState();
@@ -198,6 +236,7 @@ function createSession() {
   }
 
   function dispose(): void {
+    disposed = true;
     if (fastTimer !== undefined) clearInterval(fastTimer);
     if (slowTimer !== undefined) clearInterval(slowTimer);
     fastTimer = undefined;
@@ -243,17 +282,6 @@ function createSession() {
     else if (result) notice("error", "重启失败", result.error);
     await refreshState();
     await refreshFast();
-  }
-
-  function useVersion(name: string): void {
-    void run("切换版本", () => {
-      const target = api.useVersion(state(), name);
-      if (!target) throw new Error(`找不到版本目录「${name}」`);
-      notice("success", `当前版本 → ${target.name}`);
-      refreshCatalog();
-      void refreshState();
-      return target;
-    });
   }
 
   /** 发一条控制台命令：回执分类文案直接进控制台面板，也留一条 notice。 */
@@ -333,21 +361,6 @@ function createSession() {
     await refreshFast();
   }
 
-  async function switchMode(playlist: string, map?: string): Promise<void> {
-    const result = await run("切换模式", () => api.setLiveMode(state(), playlist, map));
-    if (result === undefined) return;
-    if (result === "no-control") {
-      notice("error", "切换模式", api.NO_CONTROL_MESSAGE);
-      return;
-    }
-    if (!result.ok) {
-      notice("error", "切换模式", result.error);
-      return;
-    }
-    notice(result.receipt.kind === "success" ? "success" : "warning", "切换模式", `${result.playlist} · ${result.map}`);
-    await refreshState();
-  }
-
   async function broadcast(): Promise<void> {
     const result = await run("广播公告", () => api.broadcastAnnouncements(state()));
     if (result === "no-control") {
@@ -384,32 +397,6 @@ function createSession() {
     if (!result) return;
     for (const line of result.applied) notice("success", "已恢复默认", line);
     await refreshState();
-  }
-
-  async function activateProfile(name: string): Promise<void> {
-    const ok = api.activateProfile(state(), name);
-    if (!ok) {
-      notice("error", "启用配置", `找不到档案「${name}」`);
-      return;
-    }
-    notice("success", "已切换配置", name);
-    await refreshState();
-  }
-
-  async function writeProfile(action: "create" | "overwrite" | "delete", name: string): Promise<boolean> {
-    const result = await run("配置档案", () => {
-      if (action === "create") return api.createProfile(state(), name);
-      if (action === "overwrite") return api.overwriteProfile(state(), name);
-      return api.deleteProfile(state(), name);
-    });
-    if (!result) return false;
-    if (!result.ok) {
-      notice("error", "配置档案", result.error);
-      return false;
-    }
-    notice("success", "配置档案", `${action === "delete" ? "已删除" : "已保存"} ${result.name}`);
-    await refreshState();
-    return true;
   }
 
   /** 打开（或换到）某个日志分片；`follow` 为真时继续吃增量。 */
@@ -485,8 +472,27 @@ function createSession() {
     following,
     setFollowing,
     // 派生
-    profiles: (): ProfileRow[] => api.listProfiles(state()),
-    settings: (): Settings => state().settings,
+    selected: (): ServerInstance | null => api.selectedInstance(state()),
+    settings: (): Settings => api.selectedInstance(state())?.settings ?? api.defaultSettings,
+    fleet,
+    refreshError,
+    history: (id: string | null, hours = 1) => {
+      metricsRevision();
+      return metricHistory(id, hours);
+    },
+    selectInstance: async (id: string): Promise<void> => {
+      if (busy() !== null) return;
+      api.selectServerInstance(state(), id);
+      setInstance(null);
+      setPlayers([]);
+      setConsoleLog([]);
+      setHealth(null);
+      setFollowing(true);
+      await refreshState();
+      refreshCatalog();
+      await refreshFast();
+      void refreshSlow();
+    },
     running: (): boolean => instance()?.alive === true,
     // 生命周期
     start,
@@ -502,18 +508,14 @@ function createSession() {
     startServer,
     stopServer,
     restartServer,
-    useVersion,
     console,
     moderate,
     addBots,
     clearBots,
-    switchMode,
     broadcast,
     saveAnnouncements,
     saveSettings,
     resetSetting,
-    activateProfile,
-    writeProfile,
     openShard,
     clearLog,
     ledger: readLedger,

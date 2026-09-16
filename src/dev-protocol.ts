@@ -1,6 +1,10 @@
 /**
  * Dev 模式（R5F_DEV=1）本地模拟实例的共享协议：快照文件的形状，以及"怎么让它退出"。
  *
+ * 一个实例一份快照（`<DEV_ROOT>/engines/<实例 id>.json`）：同一台机器上可以同时跑多个
+ * 模拟实例，进程表、端口占用、控制通道都按实例分别回答。全局单快照做不到这件事 ——
+ * 第二个实例一启动就会把第一个的身份覆盖掉。
+ *
  * 停止路径刻意**不**用 `process.kill(runtime.pid)`：那个 pid 在我们拿到它之后可能已经
  * 被系统回收给了别的进程，对着一个可能被复用的 OS pid 发信号，等于随机杀别人的进程。
  * 模拟引擎监听一个真实的 loopback 控制端口，停止请求一路走到引擎自己收尾（清定时器、
@@ -9,20 +13,22 @@
  * 本模块只被 dev 路径引用（CLI 的隐藏命令、模拟引擎、Windows 适配层的 dev 分支）。
  * 两个进程都要用到的东西只有一个来源：这里的类型与常量。
  */
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { DEV_MODE, DEV_ROOT } from "./dev";
-import { loadState } from "./state";
-import { selfCommand } from "./tap";
+import { type Runtime, type ServerInstance, type State, loadState } from "./state";
+import { isPidAlive, selfCommand } from "./tap";
 
-/** 模拟引擎写、面板与 CLI 读的运行标识。就这五个字段，没有隐藏字段。 */
+/** 模拟引擎写、面板与 CLI 读的运行标识。 */
 export type DevEngineSnapshot = {
   /** 模拟引擎进程的 pid。 */
   pid: number;
+  /** 哪个实例（也决定快照文件名）。 */
+  instance: string;
   /** 模拟的游戏 UDP 端口（**没有真的绑**，只用于标题/状态显示）。 */
   port: number;
-  /** 模拟的版本目录（DEV_ROOT 里的 fixture）。 */
+  /** 模拟的版本目录（实例自己的引擎工作副本）。 */
   versionPath: string;
   /** 引擎启动时刻（ISO）。 */
   startedAt: string;
@@ -32,9 +38,15 @@ export type DevEngineSnapshot = {
 
 // --------------------------------------------------------------- 快照文件
 
-/** 快照路径固定落在 DEV_ROOT 里：调用方无权改（改了就不认）。 */
-export function devEngineSnapshotPath(): string {
-  return join(DEV_ROOT, "dev-engine.json");
+/** 快照目录固定落在 DEV_ROOT 里：调用方无权改（改了就不认）。 */
+export function devEngineSnapshotDir(): string {
+  return join(DEV_ROOT, "engines");
+}
+
+/** 实例 id 会拼进文件名：只收我们发放的那套字符。 */
+function snapshotFile(instance: string): string {
+  if (!/^[a-z0-9-]{1,64}$/.test(instance)) throw new Error(`模拟实例 id 不合法：${JSON.stringify(instance)}`);
+  return join(devEngineSnapshotDir(), `${instance}.json`);
 }
 
 function readPositiveInt(value: unknown): number {
@@ -42,47 +54,79 @@ function readPositiveInt(value: unknown): number {
   return Number.isInteger(n) && n > 0 ? n : 0;
 }
 
-/** 读快照；缺失、损坏或字段类型不对都是 null（调用方据此判定"没有实例"）。 */
-export function readDevEngineSnapshot(): DevEngineSnapshot | null {
-  const path = devEngineSnapshotPath();
+function parseSnapshot(raw: unknown): DevEngineSnapshot | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const o = raw as Record<string, unknown>;
+  const pid = readPositiveInt(o.pid);
+  const port = readPositiveInt(o.port);
+  const versionPath = typeof o.versionPath === "string" ? o.versionPath : "";
+  const startedAt = typeof o.startedAt === "string" ? o.startedAt : "";
+  const instance = typeof o.instance === "string" ? o.instance : "";
+  if (pid === 0 || port === 0 || versionPath.length === 0 || startedAt.length === 0) return null;
+  if (!/^[a-z0-9-]{1,64}$/.test(instance)) return null;
+  return { pid, instance, port, versionPath, startedAt, title: typeof o.title === "string" ? o.title : "" };
+}
+
+/** 某个实例的快照；缺失、损坏或字段类型不对都是 null（调用方据此判定"没有实例"）。 */
+export function readDevEngineSnapshot(instance: string): DevEngineSnapshot | null {
+  const path = snapshotFile(instance);
   if (!existsSync(path)) return null;
-  let raw: Record<string, unknown>;
   try {
-    raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    return parseSnapshot(JSON.parse(readFileSync(path, "utf8")) as unknown);
   } catch {
     return null;
   }
-  const pid = readPositiveInt(raw.pid);
-  const port = readPositiveInt(raw.port);
-  const versionPath = typeof raw.versionPath === "string" ? raw.versionPath : "";
-  const startedAt = typeof raw.startedAt === "string" ? raw.startedAt : "";
-  if (pid === 0 || port === 0 || versionPath.length === 0 || startedAt.length === 0) return null;
-  return {
-    pid,
-    port,
-    versionPath,
-    startedAt,
-    title: typeof raw.title === "string" ? raw.title : "",
-  };
+}
+
+/** An engine already running during migration keeps writing its original snapshot until it exits. */
+function readLegacyEngineSnapshot(): DevEngineSnapshot | null {
+  try {
+    const raw = JSON.parse(readFileSync(join(DEV_ROOT, "dev-engine.json"), "utf8")) as unknown;
+    if (typeof raw !== "object" || raw === null) return null;
+    return parseSnapshot({ ...raw, instance: "legacy" });
+  } catch {
+    return null;
+  }
+}
+
+/** 全部快照（含 pid 已经死掉的陈旧文件；调用方按需再过滤存活）。 */
+export function readDevEngineSnapshots(): DevEngineSnapshot[] {
+  const dir = devEngineSnapshotDir();
+  const names = existsSync(dir) ? readdirSync(dir) : [];
+  const out: DevEngineSnapshot[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    const instance = name.slice(0, -".json".length);
+    const snapshot = readDevEngineSnapshot(instance);
+    if (snapshot !== null) out.push(snapshot);
+  }
+  const legacy = readLegacyEngineSnapshot();
+  if (legacy !== null && !out.some((snapshot) => snapshot.pid === legacy.pid)) out.push(legacy);
+  return out;
+}
+
+/** 真正还活着的模拟实例（pid 存活）。 */
+export function liveDevEngineSnapshots(): DevEngineSnapshot[] {
+  return readDevEngineSnapshots().filter((snapshot) => isPidAlive(snapshot.pid));
 }
 
 /** 原子写（临时文件 + rename）：面板随时可能读到它，不能读到半截 JSON。 */
 export function writeDevEngineSnapshot(snapshot: DevEngineSnapshot): void {
-  const path = devEngineSnapshotPath();
-  mkdirSync(dirname(path), { recursive: true });
-  const tmp = `${path}.tmp`;
+  const path = snapshotFile(snapshot.instance);
+  mkdirSync(devEngineSnapshotDir(), { recursive: true });
+  const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
   renameSync(tmp, path);
 }
 
-/** 优雅退出时清掉快照（崩溃留下的陈旧快照由启动侧按 pid 存活判定忽略）。 */
-export function removeDevEngineSnapshot(): void {
-  const path = devEngineSnapshotPath();
+/** 优雅退出时清掉自己的快照（崩溃留下的陈旧快照由使用方按 pid 存活判定忽略）。 */
+export function removeDevEngineSnapshot(instance: string): void {
+  const path = snapshotFile(instance);
   try {
     rmSync(path, { force: true });
-    rmSync(`${path}.tmp`, { force: true });
+    rmSync(`${path}.${process.pid}.tmp`, { force: true });
   } catch {
-    /* 删不掉也只能算了：启动侧的存活判定仍然成立 */
+    /* 删不掉也只能算了：使用方的存活判定仍然成立 */
   }
 }
 
@@ -167,25 +211,37 @@ function stopOnce(port: number, token: string, budgetMs: number): Promise<StopAt
 }
 
 /**
+ * 哪个实例的记录里写着这个 pid。身份只在状态文件里认：快照里没有令牌，
+ * 因此 nobody 能靠快照拿到控制凭据。
+ */
+function instanceByEnginePid(pid: number): { instance: ServerInstance; runtime: Runtime } | null {
+  let state: State;
+  try {
+    state = loadState();
+  } catch {
+    return null; // 状态文件损坏：读不到身份，就别乱发停止请求
+  }
+  for (const instance of state.instances) {
+    if (instance.runtime?.pid === pid) return { instance, runtime: instance.runtime };
+  }
+  return null;
+}
+
+/**
  * 让指定 pid 的模拟实例停下来。
  *
- * 身份判定要**三处一致**才动手：状态文件里的 `runtime.pid`、快照里的 `pid`、以及
- * 调用方给的 pid —— 任何一处对不上都返回 false（宁可报"没停"，也不对着陌生端口发命令）。
- * 令牌与端口只从状态文件取：快照里没有它们，也就不会有人把它当成凭据。
+ * 身份判定要**三处一致**才动手：状态文件里某个实例的 `runtime.pid`、该实例快照里的
+ * `pid`、以及调用方给的 pid —— 任何一处对不上都返回 false（宁可报"没停"，也不对着
+ * 陌生端口发命令）。
  */
 export async function requestDevStop(pid: number, timeoutMs = DEV_STOP_TIMEOUT_MS): Promise<boolean> {
   if (!DEV_MODE || !Number.isInteger(pid) || pid <= 0) return false;
-  let runtime: { pid: number; ctlPort?: number; ctlToken?: string } | null = null;
-  try {
-    runtime = loadState().runtime;
-  } catch {
-    return false; // 状态文件损坏：读不到身份，就别乱发停止请求
-  }
-  if (!runtime || runtime.pid !== pid) return false;
-  const snapshot = readDevEngineSnapshot();
+  const found = instanceByEnginePid(pid);
+  if (!found) return false;
+  const snapshot = readDevEngineSnapshot(found.instance.id) ?? readLegacyEngineSnapshot();
   if (!snapshot || snapshot.pid !== pid) return false;
-  const port = runtime.ctlPort ?? 0;
-  const token = runtime.ctlToken ?? "";
+  const port = found.runtime.ctlPort ?? 0;
+  const token = found.runtime.ctlToken ?? "";
   if (port <= 0 || token.length === 0) return false;
   const deadline = Date.now() + Math.max(1000, timeoutMs);
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {

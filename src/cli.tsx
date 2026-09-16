@@ -23,6 +23,7 @@ import {
   cmdConsole,
   cmdDoctor,
   cmdHealth,
+  cmdInstance,
   cmdList,
   cmdLogs,
   cmdModeList,
@@ -35,9 +36,12 @@ import {
   cmdStart,
   cmdStatus,
   cmdStop,
+  cmdTemplate,
   cmdUpgrade,
   cmdUse,
+  type InstanceAction,
   type SettingChange,
+  type TemplateAction,
 } from "./commands";
 import { DEV_MODE } from "./dev";
 import { runDevEngine } from "./dev-engine";
@@ -94,23 +98,83 @@ function buildProgram(): Command {
 
   program
     .command("list")
-    .description("列出根目录下的可用版本")
+    .description("列出根目录下的可用版本（标出选中实例在用的那个）")
     .option("--fast", "跳过体积统计")
     .action((opts: { fast?: boolean }) => {
       cmdList(state, { withSizes: !opts.fast });
     });
 
   program
+    .command("instance")
+    .argument("[action]", "list | show | create | copy | update | delete | select", "list")
+    .argument("[name]", "实例名（show/create/copy/update/delete/select）或 id")
+    .argument("[ver]", "create/update：版本目录名（create 省略时用当前选中的版本，再省略用最新的一个）")
+    .description("多实例管理：一台机器上跑多个服务器实例，每个实例有自己的版本/设置/模式模板")
+    .option("--template <id>", "create/update：绑定的模式模板 id")
+    .option("--no-template", "update：解绑模式模板")
+    .option("--rename <name>", "update：改实例名")
+    .option("--port <n>", "create/update：UDP 端口（create 省略时自动挑一个空闲的）")
+    .option("--json", "list 输出 JSON")
+    .action(
+      async (
+        action: string,
+        name: string | undefined,
+        ver: string | undefined,
+        opts: { template?: string | boolean; rename?: string; port?: string; json?: boolean },
+      ) => {
+        const ACTIONS: InstanceAction[] = ["list", "show", "create", "copy", "update", "delete", "select"];
+        if (!ACTIONS.includes(action as InstanceAction)) {
+          console.log(red(`用法：r5-server instance <${ACTIONS.join("|")}>`));
+          process.exitCode = 1;
+          return;
+        }
+        // `--no-template` 在 commander 里是 `template === false`；`--template none` 也一样解绑。
+        const template =
+          opts.template === false ? "none" : typeof opts.template === "string" ? opts.template : undefined;
+        process.exitCode = await cmdInstance(state, action as InstanceAction, {
+          name,
+          rename: stringOrUndefined(opts.rename),
+          version: stringOrUndefined(ver),
+          template,
+          port: numberOrUndefined(opts.port, "--port"),
+          json: Boolean(opts.json),
+        });
+      },
+    );
+
+  program
+    .command("template")
+    .argument("[action]", "list | fields | apply | remove", "list")
+    .argument("[id]", "remove：模板 id 或名字")
+    .description("模式模板：玩法 + 地图 + 一组对局参数（运行期用 playlist_override_set 下发）")
+    .option("--playlist <id>", "fields：看哪个玩法的可调参数（省略时用选中实例的模式）")
+    .option("--reload", "apply：先热切到模板的模式+地图（会换图，玩家会掉线）再下发覆盖")
+    .action(async (action: string, id: string | undefined, opts: { playlist?: string; reload?: boolean }) => {
+      const ACTIONS: TemplateAction[] = ["list", "fields", "apply", "remove"];
+      if (!ACTIONS.includes(action as TemplateAction)) {
+        console.log(red(`用法：r5-server template <${ACTIONS.join("|")}>`));
+        process.exitCode = 1;
+        return;
+      }
+      process.exitCode = await cmdTemplate(state, action as TemplateAction, {
+        id,
+        playlist: stringOrUndefined(opts.playlist),
+        reload: Boolean(opts.reload),
+      });
+    });
+
+  program
     .command("use")
     .argument("[dir]", "版本目录名，例如 r5f-dedi-1.0.13")
-    .description("选择/切换当前使用的版本")
+    .description("给选中实例选择/切换版本")
     .action(async (dir?: string) => {
       process.exitCode = await cmdUse(state, dir);
     });
 
   program
     .command("start")
-    .description("启动当前版本（未选择时会先让你选）")
+    .description("启动实例（默认启动选中的那个）")
+    .option("--instance <name>", "启动哪个实例（id 或名字；默认：选中的那个）")
     .option("--port <n>", "UDP 端口")
     .option("--map <stem>", "启动地图")
     .option("--playlist <id>", "启动即进入某模式")
@@ -121,10 +185,11 @@ function buildProgram(): Command {
     .option("--foreground", "前台运行（Ctrl+C 结束）")
     .option("--no-restart", "前台模式下退出后不自动重启")
     .option("--no-host", "不启用托管控制台（日志只在引擎窗口）")
-    .option("--force", "已有实例或端口占用时仍然启动")
+    .option("--force", "端口被别的进程占用时仍然启动（同一个实例已经在跑时无效）")
     .option("--detach", "后台运行（默认）")
     .action(async (opts: Record<string, unknown>) => {
       process.exitCode = await cmdStart(state, {
+        instance: stringOrUndefined(opts.instance),
         port: numberOrUndefined(opts.port, "--port"),
         map: stringOrUndefined(opts.map),
         playlist: stringOrUndefined(opts.playlist),
@@ -142,18 +207,24 @@ function buildProgram(): Command {
   program
     .command("stop")
     .description("停止实例（含日志守护）")
-    .option("--all", "停止本目录下所有实例")
-    .action((opts: { all?: boolean }) => {
-      process.exitCode = cmdStop(state, { all: Boolean(opts.all) });
+    .option("--instance <name>", "停哪个实例（id 或名字；默认：选中的那个）")
+    .option("--all", "停止所有有运行记录的实例")
+    .action((opts: { all?: boolean; instance?: string }) => {
+      process.exitCode = cmdStop(state, {
+        all: Boolean(opts.all),
+        instance: stringOrUndefined(opts.instance),
+      });
     });
 
   program
     .command("restart")
-    .description("重启当前版本")
-    .action(async () => {
-      // 旧实例没停下来就别再起一个（否则会变成第二个实例，模拟模式更是直接拒绝）。
-      if (cmdStop(state, {}) !== 0) return;
-      process.exitCode = await cmdStart(state, {});
+    .description("重启实例（默认：选中的那个）")
+    .option("--instance <name>", "重启哪个实例（id 或名字；默认：选中的那个）")
+    .action(async (opts: { instance?: string }) => {
+      const instance = stringOrUndefined(opts.instance);
+      // 旧实例没停下来就别再起一个（否则会变成第二个进程抢同一个端口）。
+      if (cmdStop(state, { instance }) !== 0) return;
+      process.exitCode = await cmdStart(state, { instance });
     });
 
   program
@@ -530,19 +601,23 @@ function buildProgram(): Command {
   program
     .command("__dev-engine", { hidden: true })
     .description("开发模式的本机模拟引擎（由 start 拉起）")
-    .requiredOption("--version-path <path>", "沙箱内的模拟版本目录")
+    .requiredOption("--instance <id>", "这个模拟实例属于哪个实例（快照文件名）")
+    .requiredOption("--version-path <path>", "实例自己的引擎工作副本目录")
     .requiredOption("--settings <json>", "启动设置 JSON")
     .requiredOption("--log <path>", "引擎日志文件（命令回执从这里读回）")
     .requiredOption("--ctl-token <token>", "控制通道口令")
-    .action(async (opts: { versionPath: string; settings: string; log: string; ctlToken: string }) => {
-      if (!DEV_MODE) throw new Error("模拟引擎只在 R5F_DEV=1 时可用。");
-      process.exitCode = await runDevEngine({
-        versionPath: opts.versionPath,
-        settings: JSON.parse(opts.settings) as Settings,
-        logFile: opts.log,
-        ctlToken: opts.ctlToken,
-      });
-    });
+    .action(
+      async (opts: { instance: string; versionPath: string; settings: string; log: string; ctlToken: string }) => {
+        if (!DEV_MODE) throw new Error("模拟引擎只在 R5F_DEV=1 时可用。");
+        process.exitCode = await runDevEngine({
+          instance: opts.instance,
+          versionPath: opts.versionPath,
+          settings: JSON.parse(opts.settings) as Settings,
+          logFile: opts.log,
+          ctlToken: opts.ctlToken,
+        });
+      },
+    );
 
   // hidden: 模拟实例的同步停止入口（`win.killTree` 在开发模式下用它）。
   // 它不直接发信号，而是走引擎的控制通道让引擎自己收尾。

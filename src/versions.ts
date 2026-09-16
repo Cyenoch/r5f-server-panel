@@ -6,7 +6,8 @@ import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { readTextIfPresent } from "./util";
 
-const TRIAD = ["r5apex_ds.exe", "server.dll", "loader.dll"] as const;
+/** 这三件齐全才算一个可用的版本目录（实例工作副本也按它核对）。 */
+export const REQUIRED_FILES = ["r5apex_ds.exe", "server.dll", "loader.dll"] as const;
 
 export type VersionInfo = {
   /** directory name, e.g. "r5f-dedi-1.0.13" */
@@ -70,7 +71,7 @@ function inspectVersion(dir: string): VersionInfo {
   const path = dir;
   const name = dir.split(/[\\/]/).findLast(Boolean) ?? dir;
   const missing: string[] = [];
-  for (const f of TRIAD) {
+  for (const f of REQUIRED_FILES) {
     try {
       statSync(join(path, f));
     } catch {
@@ -95,8 +96,10 @@ function inspectVersion(dir: string): VersionInfo {
 export function discoverVersions(root: string, opts: { withSizes?: boolean } = {}): VersionInfo[] {
   let dirs: string[] = [];
   try {
+    // `instances/` 装的是每个实例的引擎工作副本（4 GB 级别的复制品），不是安装版本：
+    // 把它扫进来既慢又会让人在版本列表里看到自己的副本。
     dirs = readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && !["backups", "src", "node_modules"].includes(e.name))
+      .filter((e) => e.isDirectory() && !["backups", "instances", "src", "node_modules"].includes(e.name))
       .map((e) => join(root, e.name));
   } catch {
     return [];

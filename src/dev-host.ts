@@ -18,10 +18,10 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AutostartOptions, SetupOptions } from "./commands";
 import { DEV_ROOT } from "./dev";
-import { readDevEngineSnapshot, type DevEngineSnapshot } from "./dev-protocol";
+import { type DevEngineSnapshot, liveDevEngineSnapshots } from "./dev-protocol";
 import type { HostFacts } from "./inspect";
 import { ROOT } from "./state";
-import { isPidAlive, selfCommand } from "./tap";
+import { selfCommand } from "./tap";
 import { dim, green, header, kv, yellow } from "./ui";
 import { asRecord } from "./util";
 import { discoverVersions } from "./versions";
@@ -60,13 +60,9 @@ function readJson(path: string): unknown {
 // ------------------------------------------------------------- engine snapshot
 
 /**
- * 快照由引擎进程维护，读取与校验都在 dev-protocol.ts（单一真相来源）；
- * 这里只补一条真实条件：PID 得真的活着。
+ * 快照由引擎进程各自维护（一实例一份），读取与校验都在 dev-protocol.ts（单一真相来源），
+ * 并在那里按 pid 存活过滤 —— 这里拿到的都是真正还活着的模拟实例。
  */
-function liveEngine(): DevEngineSnapshot | null {
-  const snap = readDevEngineSnapshot();
-  return snap !== null && isPidAlive(snap.pid) ? snap : null;
-}
 
 /**
  * 假进程信息。标题优先用引擎自己写进快照的那条（和真实引擎同格式），
@@ -91,27 +87,26 @@ function syntheticProc(snap: DevEngineSnapshot, nowMs: number): ProcInfo {
 
 // ------------------------------------------------------------- win.ts 快路径
 
-/** 模拟实例的进程信息；pid 不是当前实例就是 null。 */
+/** 模拟实例的进程信息；pid 不属于任何活着的实例就是 null。 */
 export function devGetProcess(pid: number): ProcInfo | null {
-  const snap = liveEngine();
-  return snap !== null && snap.pid === pid ? syntheticProc(snap, Date.now()) : null;
+  const snap = liveDevEngineSnapshots().find((snapshot) => snapshot.pid === pid);
+  return snap === undefined ? null : syntheticProc(snap, Date.now());
 }
 
 export function devFindDediProcesses(name = DEDI_NAME): ProcInfo[] {
   if (name !== DEDI_NAME) return [];
-  const snap = liveEngine();
-  return snap === null ? [] : [syntheticProc(snap, Date.now())];
+  const now = Date.now();
+  return liveDevEngineSnapshots().map((snapshot) => syntheticProc(snapshot, now));
 }
 
 export function devUdpEndpoints(pid: number): string[] {
-  const snap = liveEngine();
-  return snap !== null && snap.pid === pid ? [`0.0.0.0:${snap.port}`] : [];
+  const snap = liveDevEngineSnapshots().find((snapshot) => snapshot.pid === pid);
+  return snap === undefined ? [] : [`0.0.0.0:${snap.port}`];
 }
 
-/** 只有快照里的那个端口，在实例活着时算占用。 */
+/** 任何一个活着的模拟实例占了它，就算占用（默认端口互斥靠这个）。 */
 export function devPortInUse(port: number): boolean {
-  const snap = liveEngine();
-  return snap !== null && snap.port === port;
+  return liveDevEngineSnapshots().some((snapshot) => snapshot.port === port);
 }
 
 export function devPhysicalRamGB(): number {
@@ -197,7 +192,7 @@ function writeDevHostState(next: DevHostState): void {
 export function collectDevHostFacts(ports: number[]): HostFacts {
   const host = readDevHostState();
   const wanted = ports.filter(isPort);
-  const snap = liveEngine();
+  const live = liveDevEngineSnapshots();
   return {
     ramGB: host.ramGB,
     pageInitMB: host.pageInitMB,
@@ -207,7 +202,7 @@ export function collectDevHostFacts(ports: number[]): HostFacts {
     defenderDetail: host.defenderExcluded ? "已排除模拟根目录" : "未设置任何排除路径（模拟）",
     taskState: host.taskState,
     taskTrigger: host.taskTrigger,
-    portInUse: snap !== null && wanted.includes(snap.port),
+    portInUse: live.some((snapshot) => wanted.includes(snapshot.port)),
     firewallMissing: wanted.filter((p) => !host.firewallPorts.includes(p)),
   };
 }

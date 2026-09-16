@@ -1,38 +1,44 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { DEV_MODE } from "./dev";
-import { ROOT, STATE_FILE, defaultSettings, saveState } from "./state";
+import type { ModeTemplate } from "./mode-templates";
+import { ROOT, STATE_FILE, type ServerInstance, type Settings, defaultSettings, loadState, withState } from "./state";
 
-const PLAYLISTS = `"playlists"
+/** 与真机同形：键不带引号、值照原样（`name "FS 1v1"` / `flowstateRoundtime 60`）。 */
+const PLAYLISTS = `playlists
 {
-  "Playlists"
+  Playlists
   {
-    "fs_1v1"
+    fs_1v1
     {
-      "vars"
+      vars
       {
-        "name" "1v1"
-        "r5f_mode_family" "1v1"
-        "r5f_mode_family_title" "单挑"
-        "r5f_mode_title" "1v1 练习（模拟）"
-        "r5f_mode_map" "mp_rr_arena_habitat"
-        "r5f_mode_order" "1"
-        "r5f_mode_blurb" "本地开发数据，不运行真实对局"
+        name "1v1（模拟）"
+        r5f_mode_family 1v1
+        r5f_mode_family_title "单挑"
+        r5f_mode_title "1v1 练习（模拟）"
+        r5f_mode_map mp_rr_arena_habitat
+        r5f_mode_order 1
+        r5f_mode_blurb "本地开发数据，不运行真实对局"
+        flowstateRoundtime 60
+        flowstateRoundsBeforeChangeLevel 2
+        flowstateAutoChangeLevelEnable 1
       }
-      "gamemodes" { "survival" { "maps" { "mp_rr_arena_habitat" "1" "mp_rr_arena_phase_runner" "1" } } }
+      gamemodes { survival { maps { mp_rr_arena_habitat 1
+                                   mp_rr_arena_phase_runner 1 } } }
     }
-    "fs_dm"
+    fs_dm
     {
-      "vars"
+      vars
       {
-        "name" "Deathmatch"
-        "r5f_mode_family" "flowstate"
-        "r5f_mode_family_title" "Flowstate"
-        "r5f_mode_title" "死斗（模拟）"
-        "r5f_mode_map" "mp_rr_arena_phase_runner"
-        "r5f_mode_order" "2"
+        name "Deathmatch（模拟）"
+        r5f_mode_family flowstate
+        r5f_mode_family_title "Flowstate"
+        r5f_mode_title "死斗（模拟）"
+        r5f_mode_map mp_rr_arena_phase_runner
+        r5f_mode_order 2
       }
-      "gamemodes" { "survival" { "maps" { "mp_rr_arena_phase_runner" "1" } } }
+      gamemodes { survival { maps { mp_rr_arena_phase_runner 1 } } }
     }
   }
 }
@@ -67,6 +73,19 @@ const FILES: Record<string, string> = {
   "banlist.json": "[]\n",
 };
 
+/** 沙箱里第一个实例的 id：固定值，方便人直接去看 `.dev/r5f/instances/<id>/engine`。 */
+const DEV_INSTANCE_ID = "inst-dev00000000";
+
+/** 沙箱里预置一个模式模板：面板的模式模板页与 `template apply` 一开箱就有东西可试。 */
+const DEV_TEMPLATE: ModeTemplate = {
+  id: "tpl-dev1v1",
+  name: "1v1 · 长局（模拟）",
+  playlist: "fs_1v1",
+  map: "mp_rr_arena_habitat",
+  overrides: { flowstateRoundtime: "600" },
+  updatedAt: "2026-01-01T00:00:00.000Z",
+};
+
 /** Seed only missing files: edits and selection survive hot reloads and CLI subprocesses. */
 export function ensureDevFixtures(): void {
   if (!DEV_MODE) return;
@@ -79,14 +98,21 @@ export function ensureDevFixtures(): void {
     }
   }
   if (!existsSync(STATE_FILE)) {
-    const settings = { ...defaultSettings, hostname: "R5F 开发服（模拟）", statsUpload: "off" as const };
-    saveState({
-      current: "r5f-dedi-1.0.13-dev",
+    const settings: Settings = { ...defaultSettings, hostname: "R5F 开发服（模拟）", statsUpload: "off" };
+    const instance: ServerInstance = {
+      id: DEV_INSTANCE_ID,
+      name: "开发模拟",
+      version: "r5f-dedi-1.0.13-dev",
       settings,
-      profiles: [{ name: "开发模拟", settings: { ...settings }, updatedAt: new Date().toISOString() }],
-      currentProfile: "开发模拟",
+      templateId: null,
       runtime: null,
-      history: [],
+      updatedAt: new Date().toISOString(),
+    };
+    withState(loadState(), (disk) => {
+      if (existsSync(STATE_FILE)) return;
+      disk.instances = [instance];
+      disk.templates = [DEV_TEMPLATE];
+      disk.selectedInstanceId = instance.id;
     });
   }
 }

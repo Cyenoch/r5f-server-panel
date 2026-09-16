@@ -8,6 +8,10 @@
  * 之所以单独一层而不是让界面直接 import `commands.ts`：`cmd*` 是「打印 + 退出码」
  * 形状，界面要的是可渲染的数据与可判断成败的结果；两边共用同一批实现，避免出现
  * 第二套启动/审核逻辑。
+ *
+ * 实例模型：动作默认作用于**选中的实例**（`state.selectedInstanceId`）；
+ * 实例与模式模板的增删改查走本模块导出的 `*ServerInstance` / `*ModeTemplate`
+ * （失败一律抛错并带上原因，界面用 `run()` 统一转成 notice）。
  */
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -22,26 +26,41 @@ import {
 import { type Catalog, type ModeFamily, EMPTY_CATALOG, collectModes, loadCatalog } from "./catalog";
 import { type CfgScan, cfgOverridesFor, readCfgScan } from "./cfg";
 import {
+  type InstanceRow,
   type PlayerRow,
   type StartOptions,
   type StartOutcome,
   type StopResult,
+  type TemplateApplyOptions,
+  type TemplateApplyOutcome,
   NO_CONTROL_MESSAGE,
   NoControlChannelError,
+  applyInstanceTemplate,
   botsAdd,
   botsClear,
   consoleWithReceipt,
+  copyServerInstance,
+  createServerInstance,
+  deleteModeTemplate,
+  deleteServerInstance,
+  deleteServerInstanceAndWait,
   fetchBots,
   fetchPlayers,
+  instancePendingChanges,
+  instanceRows,
   listLogShards,
   logWatermark,
   moderate,
+  newTemplateId,
   readAfter,
   readBanlist,
+  saveModeTemplate,
   saveSettings,
+  selectServerInstance,
   setLiveMode,
   startInstance,
   stopInstance,
+  updateServerInstance,
 } from "./commands";
 import { DEV_MODE } from "./dev";
 import { ensureDevFixtures } from "./dev-fixtures";
@@ -54,21 +73,25 @@ import {
   collectHostFacts,
   logSinkAlive,
 } from "./inspect";
+import { findInstance, instanceVersionInfo, nextFreePort, portFamily, workspaceDir, workspaceReady } from "./instances";
+import { type ModeTemplate, type TemplateField, templateFields, validateTemplate } from "./mode-templates";
 import { type ModerationEntry, type ModerationFile, describeExpiry, loadModeration } from "./moderation";
 import { type Receipt } from "./receipt";
 import { type ServerMetrics, currentVersion, parseServerTitle } from "./serverinfo";
 import { type FieldId, SETTINGS_FIELDS, type FieldDef, applyFieldValue, fieldById } from "./settings-fields";
 import {
-  DEFAULT_PROFILE,
   STATE_FILE,
-  type Profile,
+  type Runtime,
   ROOT,
+  type ServerInstance,
   type Settings,
   type State,
   defaultSettings,
   loadState,
   record,
+  requireInstance,
   saveState,
+  selectedInstance,
 } from "./state";
 import { readDelta, readTailState, stripAnsi } from "./tap";
 import { type VersionInfo, discoverVersions, formatSize } from "./versions";
@@ -77,7 +100,6 @@ import * as win from "./win";
 export {
   ROOT,
   STATE_FILE,
-  DEFAULT_PROFILE,
   defaultSettings,
   loadState,
   saveState,
@@ -85,6 +107,27 @@ export {
   fieldById,
   SETTINGS_FIELDS,
   formatSize,
+  // 选中项与实例 / 模板的增删改查：界面唯一入口就是这些（失败抛错，原因照原样显示）。
+  selectedInstance,
+  requireInstance,
+  createServerInstance,
+  updateServerInstance,
+  copyServerInstance,
+  deleteServerInstance,
+  deleteServerInstanceAndWait,
+  selectServerInstance,
+  instanceRows,
+  instancePendingChanges,
+  findInstance,
+  nextFreePort,
+  workspaceDir,
+  workspaceReady,
+  saveModeTemplate,
+  deleteModeTemplate,
+  newTemplateId,
+  applyInstanceTemplate,
+  templateFields,
+  validateTemplate,
 };
 export { NO_CONTROL_MESSAGE, NoControlChannelError };
 export type {
@@ -97,16 +140,21 @@ export type {
   FieldId,
   Health,
   HostFacts,
+  InstanceRow,
   ModeFamily,
+  ModeTemplate,
   ModerationFile,
   PlayerRow,
-  Profile,
   Receipt,
+  ServerInstance,
   ServerMetrics,
   Settings,
   StartOptions,
   StartOutcome,
   State,
+  TemplateApplyOutcome,
+  TemplateApplyOptions,
+  TemplateField,
   VersionInfo,
 };
 
@@ -134,13 +182,16 @@ export function activeVersion(state: State): VersionInfo | null {
   return currentVersion(state);
 }
 
-/** 换版本：只写 `state.current`，不动任何版本目录内容。 */
+/**
+ * 给**选中实例**换版本：只写实例记录的 `version`，不动任何版本目录内容。
+ * 版本目录名不对（或没有选中的实例）返回 null。
+ */
 export function useVersion(state: State, name: string): VersionInfo | null {
+  const instance = selectedInstance(state);
+  if (instance === null) return null;
   const target = listVersions().find((version) => version.name === name) ?? null;
   if (!target) return null;
-  state.current = target.name;
-  record(state, "use", target.name);
-  saveState(state);
+  updateServerInstance(state, instance.id, { version: target.name });
   return target;
 }
 
@@ -166,9 +217,9 @@ export type InstanceMetrics = {
   live: { playlist: string; map: string; at: string } | null;
 };
 
-/** 当前实例的运行数据；进程没了就只回放 `runtime` 里的记录（`alive: false`）。 */
-export async function collectInstance(state: State): Promise<InstanceMetrics | null> {
-  const runtime = state.runtime;
+/** 某个实例的运行数据；进程没了就只回放 `runtime` 里的记录（`alive: false`）。 */
+export async function collectInstanceMetrics(instance: ServerInstance): Promise<InstanceMetrics | null> {
+  const runtime = instance.runtime;
   if (!runtime?.pid) return null;
   const proc = await win.getProcessAsync(runtime.pid);
   const metrics = proc ? parseServerTitle(proc.title) : null;
@@ -190,6 +241,23 @@ export async function collectInstance(state: State): Promise<InstanceMetrics | n
   };
 }
 
+/** 选中实例的运行数据（兼容旧调用点：面板多数页面看的就是选中实例）。 */
+export async function collectInstance(state: State): Promise<InstanceMetrics | null> {
+  const instance = selectedInstance(state);
+  return instance === null ? null : await collectInstanceMetrics(instance);
+}
+
+/** 全机队的运行数据：每个实例一条，没在跑的就是 null（多实例总览用）。 */
+export async function collectFleet(
+  state: State,
+): Promise<Array<{ instance: ServerInstance; metrics: InstanceMetrics | null }>> {
+  const rows: Array<{ instance: ServerInstance; metrics: InstanceMetrics | null }> = [];
+  for (const instance of state.instances) {
+    rows.push({ instance, metrics: await collectInstanceMetrics(instance) });
+  }
+  return rows;
+}
+
 /** 本机上所有 `r5apex_ds` 进程（含不是本工具启动的）。 */
 export async function collectDediProcesses(): Promise<win.ProcInfo[]> {
   return win.findDediProcessesAsync();
@@ -202,17 +270,36 @@ export async function collectDediProcesses(): Promise<win.ProcInfo[]> {
  * 所以判断落在实例 pid 上；真实模式仍然只看 `logdPid`。
  */
 export function logDaemonAlive(state: State): boolean {
-  return logSinkAlive(state.runtime);
+  return logSinkAlive(runtimeOfInstance(selectedInstance(state)));
+}
+
+/** 实例的运行记录（面板各处都从实例上取，没有实例就是 null）。 */
+export function runtimeOfInstance(instance: ServerInstance | null): Runtime | null {
+  return instance?.runtime ?? null;
+}
+
+/** 选中实例「改了但还没重启」的地方（空数组 = 记录与进程一致）。 */
+export function selectedPendingChanges(state: State): string[] {
+  const instance = selectedInstance(state);
+  return instance === null ? [] : instancePendingChanges(state, instance);
+}
+
+/** 选中实例的引擎目录（进程真正在写的那份）；没有工作副本时是只读的安装目录。 */
+export function instanceEngineDir(instance: ServerInstance | null): string | null {
+  return instanceVersionInfo(instance)?.path ?? null;
 }
 
 // ------------------------------------------------------------------ 日志
 
 export type LogShardView = { name: string; path: string; size: number; mtime: number; current: boolean; runId: string };
 
-/** 启动分片（最新在前）；`state.runtime` 没有日志文件时把整个 logs/ 列出来。 */
+/** 选中实例的启动分片（最新在前）；没有运行记录时列出该实例全部前缀匹配的分片。 */
 export function listRunShards(state: State): LogShardView[] {
+  const instance = selectedInstance(state);
+  const prefix = instance?.version == null ? null : `${instance.version}-${instance.settings.port}-`;
   const shards: LogShardView[] = [];
-  for (const shard of listLogShards(state.runtime?.logFile)) {
+  for (const shard of listLogShards(instance?.runtime?.logFile)) {
+    if (prefix !== null && !shard.name.startsWith(prefix)) continue;
     const runId = /^(\d{8}-\d{6})\.log$/.exec(shard.name)?.[1] ?? shard.name.replace(/\.log$/, "");
     shards.push({ ...shard, runId });
   }
@@ -251,13 +338,14 @@ export function createLogReader(path: string | null, tail = 500): LogReader {
 
 // ------------------------------------------------------------------ 动作
 
+/** 启动实例：默认启动**选中**的实例，`opts.instance` 可以点名别的实例。 */
 export async function launchInstance(state: State, opts: StartOptions): Promise<StartOutcome> {
   return startInstance(state, opts, () => {});
 }
 
 /**
  * 停止实例。**没确认停止就抛错**（而不是返回 0 装作停过了）：界面把错误显示出来，
- * 实例记录仍然保留，可以再停一次。
+ * 实例记录仍然保留，可以再停一次。`all` 停掉所有有活进程记录的实例。
  */
 export function killInstance(state: State, all = false): number {
   const stopped: StopResult = stopInstance(state, { all });
@@ -266,8 +354,8 @@ export function killInstance(state: State, all = false): number {
 }
 
 export async function restartInstance(state: State, opts: StartOptions): Promise<StartOutcome> {
-  const stopped = stopInstance(state, {});
-  // 旧实例没停下来就不要再起一个：那会变成第二个实例（模拟模式更是直接拒绝）。
+  const stopped = stopInstance(state, { instance: opts.instance });
+  // 旧实例没停下来就不要再起一个：那会变成第二个进程抢同一个端口。
   if (stopped.error !== undefined) return { ok: false, error: stopped.error };
   return startInstance(state, { ...opts, force: true }, () => {});
 }
@@ -324,11 +412,11 @@ export async function listPlayers(state: State): Promise<{ header: string[]; pla
   return fetchPlayers(state);
 }
 
-// ------------------------------------------------------------------ 设置与档案
+// ------------------------------------------------------------------ 设置
 
 export type FieldValue = { id: FieldId; field: FieldDef; value: string; display: string; defaultValue: string };
 
-/** 把当前设置摊平成界面好渲染的行（顺序 = `SETTINGS_FIELDS` 的声明顺序）。 */
+/** 把一份设置摊平成界面好渲染的行（顺序 = `SETTINGS_FIELDS` 的声明顺序）。 */
 export function settingsRows(settings: Settings): FieldValue[] {
   return SETTINGS_FIELDS.map((field) => ({
     id: field.id,
@@ -339,7 +427,7 @@ export function settingsRows(settings: Settings): FieldValue[] {
   }));
 }
 
-/** 保存一批改动（唯一入口就是 `commands.saveSettings`，CLI 与面板同路）。 */
+/** 保存一批改动到**选中实例**（唯一入口就是 `commands.saveSettings`，CLI 与面板同路）。 */
 export function updateSettings(
   state: State,
   changes: { id: FieldId; raw: string }[],
@@ -347,98 +435,10 @@ export function updateSettings(
   return saveSettings(state, changes);
 }
 
-/** 把某条设置项恢复成声明里的默认值。 */
+/** 把选中实例的某条设置项恢复成声明里的默认值。 */
 export function resetField(state: State, id: FieldId): { applied: string[]; failed: string[] } {
   const field = fieldById(id);
   return saveSettings(state, [{ id, raw: String(field.defaultValue) }]);
-}
-
-export type ProfileRow = Profile & { active: boolean; summary: string };
-
-function profileSummary(settings: Settings): string {
-  const parts = [
-    settings.playlist.length > 0 ? settings.playlist : "玩家选模式",
-    settings.map.length > 0 ? settings.map : "玩家选地图",
-    `UDP ${settings.port}`,
-  ];
-  return parts.join(" · ");
-}
-
-export function listProfiles(state: State): ProfileRow[] {
-  return state.profiles.map((profile) => ({
-    ...profile,
-    active: profile.name === state.currentProfile,
-    summary: profileSummary(profile.settings),
-  }));
-}
-
-/** 用某个档案启动 = 把档案的值复制进生效设置（CLI 只认 `settings`，语义不变）。 */
-export function activateProfile(state: State, name: string): boolean {
-  const profile = state.profiles.find((entry) => entry.name === name);
-  if (!profile) return false;
-  state.settings = { ...profile.settings };
-  state.currentProfile = profile.name;
-  record(state, "profile", `启用 ${profile.name}`);
-  saveState(state);
-  return true;
-}
-
-export type ProfileWrite = { ok: true; name: string } | { ok: false; error: string };
-
-/** 新建档案：把当前生效设置存成一个新名字。 */
-export function createProfile(state: State, name: string, from: Settings = state.settings): ProfileWrite {
-  const trimmed = name.trim();
-  if (trimmed.length === 0) return { ok: false, error: "档案名不能为空" };
-  if (trimmed.length > 40) return { ok: false, error: "档案名最长 40 个字符" };
-  if (state.profiles.some((profile) => profile.name === trimmed))
-    return { ok: false, error: `已经有叫「${trimmed}」的档案` };
-  state.profiles.push({ name: trimmed, settings: { ...from }, updatedAt: new Date().toISOString() });
-  record(state, "profile", `新建 ${trimmed}`);
-  saveState(state);
-  return { ok: true, name: trimmed };
-}
-
-/** 用当前生效设置覆盖某个档案。 */
-export function overwriteProfile(state: State, name: string): ProfileWrite {
-  const profile = state.profiles.find((entry) => entry.name === name);
-  if (!profile) return { ok: false, error: `找不到档案「${name}」` };
-  profile.settings = { ...state.settings };
-  profile.updatedAt = new Date().toISOString();
-  record(state, "profile", `更新 ${name}`);
-  saveState(state);
-  return { ok: true, name };
-}
-
-export function renameProfile(state: State, from: string, to: string): ProfileWrite {
-  const trimmed = to.trim();
-  const profile = state.profiles.find((entry) => entry.name === from);
-  if (!profile) return { ok: false, error: `找不到档案「${from}」` };
-  if (trimmed.length === 0) return { ok: false, error: "档案名不能为空" };
-  if (state.profiles.some((entry) => entry.name === trimmed && entry !== profile)) {
-    return { ok: false, error: `已经有叫「${trimmed}」的档案` };
-  }
-  profile.name = trimmed;
-  profile.updatedAt = new Date().toISOString();
-  if (state.currentProfile === from) state.currentProfile = trimmed;
-  record(state, "profile", `重命名 ${from} → ${trimmed}`);
-  saveState(state);
-  return { ok: true, name: trimmed };
-}
-
-/** 删除档案；最后一条不能删（`currentProfile` 必须始终指向存在的档案）。 */
-export function deleteProfile(state: State, name: string): ProfileWrite {
-  if (state.profiles.length <= 1) return { ok: false, error: "至少要保留一个配置档案" };
-  const index = state.profiles.findIndex((entry) => entry.name === name);
-  if (index < 0) return { ok: false, error: `找不到档案「${name}」` };
-  const [removed] = state.profiles.splice(index, 1);
-  if (state.currentProfile === name) {
-    state.currentProfile = state.profiles[0]?.name ?? DEFAULT_PROFILE;
-    const next = state.profiles[0];
-    if (next) state.settings = { ...next.settings };
-  }
-  record(state, "profile", `删除 ${removed.name}`);
-  saveState(state);
-  return { ok: true, name: removed.name };
 }
 
 // ------------------------------------------------------------------ 目录 / 模式
@@ -476,10 +476,23 @@ export async function loadAnnouncements(state: State): Promise<AnnouncementsFile
 
 export type AnnouncementWrite = { ok: false; error: string } | { ok: true; path: string; rows: number };
 
-/** 写回文案表：保留原注释块与表头，只重写数据行（`renderAnnouncements` 负责）。 */
+/**
+ * 写回文案表：保留原注释块与表头，只重写数据行（`renderAnnouncements` 负责）。
+ *
+ * 写的是**实例自己那份**文件：实例还没有工作副本时明确拒绝 —— 那时候唯一的落点是
+ * 所有实例共用的安装目录，"改了公告却改到公共目录"比报错糟得多。
+ */
 export async function saveAnnouncements(state: State, rows: Announcement[]): Promise<AnnouncementWrite> {
+  const instance = selectedInstance(state);
+  if (instance === null) return { ok: false, error: "没有选中的实例。" };
   const version = currentVersion(state);
-  if (!version) return { ok: false, error: "未选择版本目录，无法定位公告文案表" };
+  if (!version) return { ok: false, error: "选中实例未选择版本目录，无法定位公告文案表" };
+  if (!workspaceReady(instance)) {
+    return {
+      ok: false,
+      error: `实例「${instance.name}」还没有自己的引擎目录（工作副本）：先启动一次（r5-server start），再编辑公告文案 —— 否则改动会落到所有实例共用的安装目录里。`,
+    };
+  }
   for (const [index, row] of rows.entries()) {
     const problems = validateAnnouncement(row);
     if (problems.length > 0) return { ok: false, error: `第 ${index + 1} 行：${problems.join("；")}` };
@@ -487,7 +500,7 @@ export async function saveAnnouncements(state: State, rows: Announcement[]): Pro
   const existing = await collectAnnouncements(version.path);
   const file = announcementsPath(version.path);
   writeFileSync(file, renderAnnouncements({ ...existing, rows }), "utf8");
-  record(state, "announcements", `写入 ${rows.length} 行`);
+  record(state, "announcements", `${instance.name}：写入 ${rows.length} 行`);
   return { ok: true, path: file, rows: rows.length };
 }
 
@@ -502,8 +515,13 @@ export async function health(state: State): Promise<Health> {
   return collectHealth(state);
 }
 
+/**
+ * 主机事实：**空实例列表也要能用**（主机配置页先于实例存在），所以按"所有已配置实例的
+ * 整组端口"探测；一个实例都没有时用默认端口族。主机事实是全机级别的，不属于某个实例。
+ */
 export async function hostFacts(state: State): Promise<HostFacts | null> {
-  return collectHostFacts([state.settings.port]);
+  const ports = state.instances.flatMap((instance) => portFamily(instance.settings.port));
+  return collectHostFacts(ports.length > 0 ? ports : portFamily(defaultSettings.port));
 }
 
 export async function capabilities(state: State): Promise<Capability[]> {

@@ -26,6 +26,9 @@ dist/
 /r5-server.json.tmp
 /backups/
 /logs/
+/instances/
+/.state-lock.sqlite*
+/metrics.sqlite*
 *.log
 
 # 开发模式（R5F_DEV=1）的本机假状态：假实例根目录、假主机 JSON、引擎快照。

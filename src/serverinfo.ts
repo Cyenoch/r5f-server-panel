@@ -1,12 +1,13 @@
+import { instanceVersionInfo } from "./instances";
 /**
  * Version/log parsers shared by the CLI commands and the TUI.
  *
  * Kept separate from commands.ts so data collectors can use them without an
  * import cycle (commands -> inspect -> serverinfo).
  */
-import { ROOT, type State } from "./state";
+import { type State, selectedInstance } from "./state";
 import { readTail, stripAnsi } from "./tap";
-import { type VersionInfo, discoverVersions, formatSize } from "./versions";
+import { type VersionInfo, formatSize } from "./versions";
 
 export function describe(v: VersionInfo): string {
   const bits: string[] = [];
@@ -17,9 +18,12 @@ export function describe(v: VersionInfo): string {
   return bits.join("  ·  ");
 }
 
+/**
+ * 选中实例当前用的版本目录。有工作副本就是副本（引擎真正在写的那份），
+ * 否则是只读的已安装版本目录 —— 路径的取舍只在 `instances.ts` 里做一次。
+ */
 export function currentVersion(state: State): VersionInfo | null {
-  if (!state.current) return null;
-  return discoverVersions(ROOT, { withSizes: false }).find((v) => v.name === state.current) ?? null;
+  return instanceVersionInfo(selectedInstance(state));
 }
 
 /** Title shape: "NAME - 0/60 Players (playlist on map) - 6% Server CPU (50.001 msec on frame 1413)". */

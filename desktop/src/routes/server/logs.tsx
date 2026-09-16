@@ -124,7 +124,10 @@ function Page(): SolidChild {
       ) : null}
 
       {errorBytes() > 0 ? (
-        <Note tone="danger" text={`本次运行记录到了错误（${formatBytes(errorBytes())}）—— 去 运维 → 体检 看是什么。`} />
+        <Note
+          tone="danger"
+          text={`本次运行记录到了错误（${formatBytes(errorBytes())}），请打开上方「健康」标签查看。`}
+        />
       ) : null}
 
       <View style={{ height: 0, flexGrow: 1, minHeight: 0, minWidth: 0, flexDirection: "column" }}>

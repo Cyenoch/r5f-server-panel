@@ -1,40 +1,12 @@
-import type { ProfileRow } from "@server/panel";
 import { MANUAL_OPTION, SETTINGS_FIELDS, type FieldDef } from "@server/settings-fields";
-/**
- * 服务器配置：左边是命名配置档案，右边是逐项启动设置。
- *
- * 版式约定（UI 重做后）：
- *  1. 设置列表是**只读清单**：一行 = 标签 + 当前值，点整行进弹窗改。
- *     过去每项常驻「说明 / 允许值 / 生效时机 / 编辑器 / 保存 / 恢复默认」六件套，
- *     14 项叠起来就是 14 块表单和 42 个按钮 —— 现在这些只出现在弹窗里。
- *  2. 档案的新建、覆盖、删除都是弹窗/确认框，行内只留 ⋯ 菜单。
- *  3. 右侧表单**必须**遍历 `@server/settings-fields` 的声明表渲染 —— 那份表是 CLI / 面板
- *     共用的唯一来源，页面手写字段清单会立刻与引擎参数漂移。
- *
- * 布局：GPUI 不是 CSS。页面根是列容器，两栏用 `flexDirection: "row"` +
- * 左侧固定 320 + 右侧 `flexGrow: 1`；滚动由 `PageScroll` 接管。
- */
+/** Selected instance settings. Shared gameplay belongs to its mode template. */
 import { Icon, Pressable, Text, View, type SolidChild } from "@solid-gpui/core";
 import { Input, Select } from "@solid-gpui/core/components";
 import { createEffect, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
-import {
-  Action,
-  Card,
-  Chip,
-  Confirm,
-  EmptyHint,
-  FormDialog,
-  FormRow,
-  Help,
-  IconAction,
-  Note,
-  PageHeader,
-  RowMenu,
-  PageScroll,
-  type RowMenuItem,
-} from "../../components/ui";
-import { formatRelative } from "../../lib/format";
+import { InstanceEditor } from "../../components/instances";
+import { Action, Card, FormDialog, FormRow, Note, PageHeader, PageScroll } from "../../components/ui";
+import { Fold } from "../../components/ui";
 import { session } from "../../lib/session";
 import { font, fontSize, palette, radius, space } from "../../lib/theme";
 
@@ -249,215 +221,46 @@ function SettingRow(props: { field: FieldDef; onOpen: (field: FieldDef) => void 
   );
 }
 
-/** 档案一行：点主体即启用；覆盖 / 删除走 ⋯ 菜单 + 确认框。 */
-function ProfileRow(props: {
-  row: ProfileRow;
-  onOverwrite: (name: string) => void;
-  onDelete: (name: string) => void;
-}): SolidChild {
-  const store = session();
-  const items = (): RowMenuItem[] => [
-    {
-      id: "activate",
-      label: "启用这份档案",
-      icon: "lucide:check",
-      disabled: props.row.active,
-      hint: props.row.active ? "已经在用这一份" : undefined,
-    },
-    { id: "overwrite", label: "用当前设置覆盖", icon: "lucide:download" },
-    { id: "delete", label: "删除…", icon: "lucide:trash-2", tone: "danger" },
-  ];
-  return (
-    <View
-      style={{
-        flexDirection: "row",
-        alignItems: "center",
-        gap: space.sm,
-        padding: space.sm,
-        minWidth: 0,
-        borderRadius: radius.md,
-        borderWidth: 1,
-        borderColor: props.row.active ? palette.primary : palette.borderSoft,
-        backgroundColor: props.row.active ? palette.panelRaised : "#00000000",
-      }}
-    >
-      <Pressable
-        tooltip="把这套设置设为当前生效"
-        accessibilityRole="button"
-        accessibilityLabel={`启用配置档案 ${props.row.name}`}
-        onPress={() => void store.activateProfile(props.row.name)}
-        style={{ flexGrow: 1, minWidth: 0, flexDirection: "column", gap: 2 }}
-      >
-        <Text style={{ fontSize: fontSize.md, fontWeight: "semibold", color: palette.text }}>{props.row.name}</Text>
-        <Text style={{ fontSize: fontSize.xs, color: palette.textDim }}>
-          {`${props.row.summary}　·　${formatRelative(props.row.updatedAt)}`}
-        </Text>
-      </Pressable>
-      {props.row.active ? <Chip tone="success" label="已生效" icon="lucide:check" /> : null}
-      <RowMenu
-        label={`档案 ${props.row.name} 的操作`}
-        items={items()}
-        onSelect={(id) => {
-          if (id === "activate") void store.activateProfile(props.row.name);
-          if (id === "overwrite") props.onOverwrite(props.row.name);
-          if (id === "delete") props.onDelete(props.row.name);
-        }}
-      />
-    </View>
-  );
-}
-
 function Page(): SolidChild {
   const store = session();
   const [editing, setEditing] = createSignal<FieldDef | null>(null);
-  const [createOpen, setCreateOpen] = createSignal(false);
-  const [draftName, setDraftName] = createSignal("");
-  const [problem, setProblem] = createSignal<string | null>(null);
-  const [overwriteTarget, setOverwriteTarget] = createSignal<string | null>(null);
-  const [deleteTarget, setDeleteTarget] = createSignal<string | null>(null);
-
-  const profiles = () => store.profiles();
-  const currentName = () => profiles().find((row) => row.active)?.name ?? "—";
-
-  async function createProfile(): Promise<void> {
-    const name = draftName().trim();
-    if (name.length === 0) {
-      setProblem("先给档案起个名字。");
-      return;
-    }
-    if (await store.writeProfile("create", name)) {
-      setDraftName("");
-      setProblem(null);
-      setCreateOpen(false);
-    } else {
-      setProblem("新建失败，看看底部的动作记录写了什么。");
-    }
-  }
-
+  const [identityOpen, setIdentityOpen] = createSignal(false);
+  const basic = new Set(["hostname", "hostip", "port", "visibility", "password", "authMode"]);
+  const gameplay = new Set(["map", "playlist"]);
+  const rows = (fields: FieldDef[]) => fields.map((field) => <SettingRow field={field} onOpen={setEditing} />);
   return (
     <PageScroll style={{ gap: space.lg, padding: space.xl }}>
       <PageHeader
-        title="服务器配置"
+        title="实例设置"
         icon="lucide:settings"
-        description="启动设置与配置档案；这里填的值在启动时写回服务器，以面板为准。"
+        description="此处显示已保存的启动配置，不代表当前进程已经采用。"
+        actions={<Action label="版本与模板" icon="lucide:layers" onPress={() => setIdentityOpen(true)} />}
       />
-
-      <View style={{ flexDirection: "row", gap: space.lg, minHeight: 0, minWidth: 0, alignItems: "flex-start" }}>
-        <View style={{ width: 320, flexShrink: 0, minWidth: 0, gap: space.lg }}>
-          <Card
-            title="配置档案"
-            icon="lucide:layers"
-            tone="accent"
-            subtitle={`${profiles().length} 个 · 已生效：${currentName()}`}
-            actions={
-              <IconAction
-                icon="lucide:plus"
-                label="新建档案（照抄当前设置）"
-                onPress={() => {
-                  setProblem(null);
-                  setCreateOpen(true);
-                }}
-              />
-            }
-          >
-            {profiles().length === 0 ? (
-              <EmptyHint
-                compact
-                icon="lucide:layers"
-                title="还没有配置档案"
-                description="用右上角的 + 新建一份（照抄当前设置）。"
-              />
-            ) : (
-              <View style={{ gap: space.sm }}>
-                {profiles().map((row) => (
-                  <ProfileRow
-                    row={row}
-                    onOverwrite={(name) => setOverwriteTarget(name)}
-                    onDelete={(name) => setDeleteTarget(name)}
-                  />
-                ))}
-              </View>
-            )}
-          </Card>
-
-          <ProfileHint />
-        </View>
-
-        <View style={{ flexGrow: 1, minWidth: 0 }}>
-          <Card
-            title="启动设置"
-            icon="lucide:sliders-horizontal"
-            tone="info"
-            subtitle="点任意一项改值；改完的表在下次启动时生效"
-          >
-            <View style={{ gap: 2 }}>
-              {SETTINGS_FIELDS.map((field, index) => (
-                <View style={{ gap: 2 }}>
-                  {index > 0 ? <View style={{ height: 1, backgroundColor: palette.borderSoft }} /> : null}
-                  <SettingRow field={field} onOpen={setEditing} />
-                </View>
-              ))}
-            </View>
-          </Card>
-        </View>
-      </View>
-
+      {store.running() ? (
+        <Note
+          tone="warning"
+          text="保存不会中断对局。网络、版本和启动参数在下次启动时生效；玩法模板通过上方「应用玩法」单独处理。"
+        />
+      ) : null}
+      <Card title="名称、网络与访问" icon="lucide:globe">
+        {rows(SETTINGS_FIELDS.filter((field) => basic.has(field.id)))}
+      </Card>
+      {store.selected()?.templateId ? (
+        <Note
+          text={`玩法由模板「${store.state().templates.find((item) => item.id === store.selected()?.templateId)?.name ?? "未知模板"}」管理，地图与规则请在游戏模式模板中编辑。`}
+        />
+      ) : (
+        <Card title="自定义玩法" icon="lucide:puzzle">
+          {rows(SETTINGS_FIELDS.filter((field) => gameplay.has(field.id)))}
+        </Card>
+      )}
+      <Fold label="高级设置 · 限流、日志与启动参数" icon="lucide:sliders-horizontal">
+        <Card>{rows(SETTINGS_FIELDS.filter((field) => !basic.has(field.id) && !gameplay.has(field.id)))}</Card>
+      </Fold>
       <SettingDialog field={editing()} onClose={() => setEditing(null)} />
-
-      <FormDialog
-        open={createOpen()}
-        title="新建配置档案"
-        okText="新建"
-        problem={problem()}
-        onClose={() => setCreateOpen(false)}
-        onOk={() => void createProfile()}
-      >
-        <FormRow label="档案名" help="新档案照抄当前设置；之后改设置不会自动同步到它，除非再点「用当前设置覆盖」。">
-          <Input
-            value={draftName()}
-            placeholder="例如 1v1 夜间"
-            ariaLabel="新档案名"
-            cleanable
-            onChange={(change) => setDraftName(change.value)}
-          />
-        </FormRow>
-      </FormDialog>
-
-      <Confirm
-        open={overwriteTarget() !== null}
-        title="覆盖这份档案？"
-        message={`会把当前的设置写进「${overwriteTarget() ?? ""}」，这份档案旧的值就没了。`}
-        confirmLabel="覆盖"
-        onConfirm={() => {
-          const name = overwriteTarget();
-          setOverwriteTarget(null);
-          if (name !== null) void store.writeProfile("overwrite", name);
-        }}
-        onCancel={() => setOverwriteTarget(null)}
-      />
-      <Confirm
-        open={deleteTarget() !== null}
-        danger
-        title="删除这份档案？"
-        message={`「${deleteTarget() ?? ""}」会被删掉。当前生效的设置不受影响。`}
-        confirmLabel="删除"
-        onConfirm={() => {
-          const name = deleteTarget();
-          setDeleteTarget(null);
-          if (name !== null) void store.writeProfile("delete", name);
-        }}
-        onCancel={() => setDeleteTarget(null)}
-      />
+      {identityOpen() && store.selected() ? (
+        <InstanceEditor open instance={store.selected()} onClose={() => setIdentityOpen(false)} />
+      ) : null}
     </PageScroll>
-  );
-}
-
-/** 档案与设置的关系只有一句要记住的话，收在卡片下面，不占正文。 */
-function ProfileHint(): SolidChild {
-  return (
-    <View style={{ flexDirection: "row", alignItems: "center", gap: space.xs, minWidth: 0 }}>
-      <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>点档案名即启用；右边改的是当前生效的值。</Text>
-      <Help text="配置档案＝一套完整的启动设置快照。启动对话框默认选上次用的那份。" />
-    </View>
   );
 }

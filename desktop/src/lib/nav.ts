@@ -25,37 +25,28 @@ export type NavGroup = { key: string; label: string; items: NavItem[] };
 
 export const NAV: NavGroup[] = [
   {
-    key: "overview",
-    label: "总览",
-    items: [{ to: "/", label: "首页", icon: "lucide:gauge", badge: "instances" }],
-  },
-  {
-    key: "server",
-    label: "服务器",
+    key: "workspace",
+    label: "工作区",
     items: [
-      { to: "/server/list", label: "服务器列表", icon: "lucide:layers" },
-      { to: "/server/instances", label: "实例", icon: "lucide:cpu", badge: "instances" },
-      { to: "/server/logs", label: "实时日志", icon: "lucide:list" },
-      { to: "/server/players", label: "玩家列表", icon: "lucide:users", badge: "players" },
+      { to: "/", label: "总览", icon: "lucide:gauge" },
+      { to: "/server/instances", label: "服务器实例", icon: "lucide:layers" },
+      { to: "/server/running", label: "运行中", icon: "lucide:cpu", badge: "instances" },
     ],
   },
   {
-    key: "config",
-    label: "配置",
+    key: "resources",
+    label: "可复用资源",
     items: [
-      { to: "/config/server", label: "服务器配置", icon: "lucide:settings" },
-      { to: "/config/modes", label: "模式与地图", icon: "lucide:puzzle" },
-      { to: "/config/announcements", label: "公告", icon: "lucide:bell" },
-      { to: "/config/host", label: "主机配置", icon: "lucide:hard-drive" },
+      { to: "/config/modes", label: "游戏模式模板", icon: "lucide:puzzle" },
+      { to: "/server/list", label: "服务端版本", icon: "lucide:download" },
     ],
   },
   {
-    key: "ops",
-    label: "运维",
+    key: "host",
+    label: "主机",
     items: [
-      { to: "/ops/health", label: "体检", icon: "lucide:heart" },
-      { to: "/ops/banlist", label: "封禁名单", icon: "lucide:box" },
-      { to: "/setup", label: "启动引导", icon: "lucide:rocket" },
+      { to: "/config/host", label: "主机环境", icon: "lucide:hard-drive" },
+      { to: "/setup", label: "开服检查清单", icon: "lucide:check-square" },
     ],
   },
 ];

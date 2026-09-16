@@ -11,6 +11,7 @@ import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DEV_MODE, DEV_ROOT } from "./dev";
 import { collectDevHostFacts } from "./dev-host";
+import { instanceLabel, portFamily } from "./instances";
 import {
   type ServerMetrics,
   currentVersion,
@@ -20,7 +21,7 @@ import {
   parseServerTitle,
   summariseLog,
 } from "./serverinfo";
-import { ROOT, type Runtime, type State } from "./state";
+import { ROOT, type Runtime, type ServerInstance, type State, defaultSettings, selectedInstance } from "./state";
 import { isPidAlive, stripAnsi } from "./tap";
 import { asRecord, readTextIfPresent } from "./util";
 import * as win from "./win";
@@ -35,6 +36,24 @@ const AUTOSTART_TASK = "R5F Dedicated Server";
 /** 模拟数据的页面标题：只在开发模式下加后缀，真实运行的文案一字不动。 */
 function sectionTitle(title: string): string {
   return DEV_MODE ? `${title}（模拟）` : title;
+}
+
+/** 端口：选中实例的设置端口；没有实例时用默认设置（体检/主机页要一个可说的数）。 */
+function portOf(instance: ServerInstance | null): number {
+  return instance?.settings.port ?? defaultSettings.port;
+}
+
+/**
+ * 一个实例占用的整组 UDP 端口（游戏 / S2S / 客户端）。
+ * 防火墙与"端口是否被占"都按整组算 —— 只放游戏端口的话，上架探测就通不过。
+ */
+function portsOf(instance: ServerInstance | null): number[] {
+  return portFamily(portOf(instance));
+}
+
+/** 某个进程属于哪个实例（按运行记录里的 pid 认）；认不出来返回 null。 */
+function instanceOfPid(state: State, pid: number): ServerInstance | null {
+  return state.instances.find((instance) => instance.runtime?.pid === pid) ?? null;
 }
 
 /**
@@ -152,14 +171,18 @@ export async function collectHostFacts(ports: number[]): Promise<HostFacts | nul
 
 // ------------------------------------------------------------------ sections
 
-function liveInstanceRows(state: State, proc: win.ProcInfo, ports: string[]): Row[] {
+function liveInstanceRows(instance: ServerInstance | null, proc: win.ProcInfo, ports: string[]): Row[] {
   const metrics = parseServerTitle(proc.title);
   const rows: Row[] = [];
   rows.push({
-    label: "进程",
-    value: proc.startedAt ? `启动于 ${proc.startedAt}` : "运行中",
+    label: "实例",
+    value: instance === null ? `(不在记录里) pid ${proc.pid}` : `${instance.name}（${instance.version ?? "未选版本"}）`,
   });
-  const uptime = formatUptime(state.runtime?.startedAt ?? "", proc.startedAt);
+  rows.push({
+    label: "进程",
+    value: proc.startedAt ? `pid ${proc.pid} 启动于 ${proc.startedAt}` : `pid ${proc.pid} 运行中`,
+  });
+  const uptime = formatUptime(instance?.runtime?.startedAt ?? "", proc.startedAt);
   if (uptime) rows.push({ label: "运行时长", value: uptime });
   if (metrics.players) rows.push({ label: "人数", value: metrics.players });
   if (metrics.map) rows.push({ label: "当前地图", value: metrics.map });
@@ -171,12 +194,19 @@ function liveInstanceRows(state: State, proc: win.ProcInfo, ports: string[]): Ro
   });
   rows.push({ label: "CPU 时间", value: `${Math.round(proc.cpuSeconds)} 秒` });
   rows.push({ label: "监听 UDP", value: ports.join(", ") || "(无)" });
+  if (instance?.runtime?.live) {
+    rows.push({
+      label: "引擎回报的模式",
+      value: `${instance.runtime.live.playlist} on ${instance.runtime.live.map}（${instance.runtime.live.at}）`,
+    });
+  }
   return rows;
 }
 
-function logRows(state: State, metrics: ServerMetrics): Row[] {
+function logRows(instance: ServerInstance | null, metrics: ServerMetrics): Row[] {
   const rows: Row[] = [];
-  const logFile = state.runtime?.logFile;
+  const runtime = instance?.runtime ?? null;
+  const logFile = runtime?.logFile;
   if (logFile && existsSync(logFile)) {
     const summary = summariseLog(logFile);
     if (!metrics.players) {
@@ -194,13 +224,13 @@ function logRows(state: State, metrics: ServerMetrics): Row[] {
   } else {
     rows.push({ label: "日志", value: "未启用托管控制台", tone: "yellow" });
   }
-  const sinkAlive = logSinkAlive(state.runtime);
+  const sinkAlive = logSinkAlive(runtime);
   rows.push({
     label: "日志记录",
-    value: sinkAlive ? "运行中" : logSinkExpected(state.runtime) ? "已停止（日志不再更新）" : "未启动",
+    value: sinkAlive ? "运行中" : logSinkExpected(runtime) ? "已停止（日志不再更新）" : "未启动",
     tone: sinkAlive ? "green" : "yellow",
   });
-  const ctlPort = state.runtime?.ctlPort ?? 0;
+  const ctlPort = runtime?.ctlPort ?? 0;
   rows.push({
     label: "远程管理",
     value: ctlPort > 0 && sinkAlive ? "可用（查在线玩家 · 踢人 · 封禁 · 公告）" : "不可用（需要以托管方式启动）",
@@ -209,8 +239,8 @@ function logRows(state: State, metrics: ServerMetrics): Row[] {
   return rows;
 }
 
-function hostRows(facts: HostFacts | null, state: State): Row[] {
-  const port = state.settings.port;
+function hostRows(facts: HostFacts | null, instance: ServerInstance | null): Row[] {
+  const port = portOf(instance);
   if (!facts) {
     return [{ label: "主机信息", value: "读取失败（PowerShell 不可用）", tone: "red" }];
   }
@@ -268,14 +298,20 @@ export function triggerLabel(cimClass: string): string {
 /** 详情页：状态总览。 */
 export async function collectDetail(state: State): Promise<Section[]> {
   const sections: Section[] = [];
+  const instance = selectedInstance(state);
   const version = currentVersion(state);
-  const s = state.settings;
+  const s = instance?.settings ?? defaultSettings;
   sections.push({
-    title: "版本与启动设置",
+    title: "实例与启动设置",
     rows: [
       {
+        label: "选中实例",
+        value: instance === null ? "未选中（先建一个：r5-server instance create）" : instanceLabel(instance),
+        tone: instance === null ? "red" : "green",
+      },
+      {
         label: "当前版本",
-        value: version ? `${version.name}  ${describe(version)}` : "未选择（主界面选中后回车）",
+        value: version ? `${version.name}  ${describe(version)}` : "未选择（r5-server use <目录名>）",
         tone: version ? "green" : "red",
       },
       {
@@ -285,6 +321,14 @@ export async function collectDetail(state: State): Promise<Section[]> {
       { label: "主机名", value: s.hostname || "(空)" },
       { label: "配额", value: `${s.quotaString} 条命令/秒 · ${s.quotaScript} 个脚本/秒` },
       { label: "附加参数", value: s.extra || "(空)" },
+      {
+        label: "模式模板",
+        value:
+          instance === null || instance.templateId === null
+            ? "未使用"
+            : (state.templates.find((t) => t.id === instance?.templateId)?.name ??
+              `(模板 ${instance.templateId} 不存在)`),
+      },
     ],
   });
 
@@ -294,15 +338,18 @@ export async function collectDetail(state: State): Promise<Section[]> {
   } else {
     for (const proc of procs) {
       const ports = await win.udpEndpointsAsync(proc.pid);
-      sections.push({ title: sectionTitle("实例"), rows: liveInstanceRows(state, proc, ports) });
+      sections.push({
+        title: sectionTitle("实例"),
+        rows: liveInstanceRows(instanceOfPid(state, proc.pid), proc, ports),
+      });
     }
   }
 
   const metrics = procs[0] ? parseServerTitle(procs[0].title) : {};
-  sections.push({ title: sectionTitle("日志"), rows: logRows(state, metrics) });
+  sections.push({ title: sectionTitle("日志"), rows: logRows(instance, metrics) });
 
-  const facts = await collectHostFacts([s.port]);
-  sections.push({ title: sectionTitle("主机"), rows: hostRows(facts, state) });
+  const facts = await collectHostFacts(portsOf(instance));
+  sections.push({ title: sectionTitle("主机"), rows: hostRows(facts, instance) });
 
   const last = state.history.slice(0, 4);
   if (last.length > 0) {
@@ -411,12 +458,14 @@ export async function collectHealth(state: State): Promise<Health> {
 
 /** 体检页：和 collectDetail 同源，但只保留体检关心的项，并给出问题清单。 */
 export async function collectDoctor(state: State): Promise<{ sections: Section[]; problems: string[] }> {
+  const instance = selectedInstance(state);
   const version = currentVersion(state);
-  const facts = await collectHostFacts([state.settings.port]);
+  const facts = await collectHostFacts(portsOf(instance));
   const procs = (await win.findDediProcessesAsync()).filter((p) => p.path.toLowerCase().startsWith(ROOT.toLowerCase()));
   const problems: string[] = [];
 
-  if (!version) problems.push("未选择版本（主界面选中版本后回车）");
+  if (instance === null) problems.push("没有选中的实例（先 r5-server instance create）");
+  if (!version) problems.push("选中实例未选版本（r5-server use <目录名>）");
   if (facts && facts.ramGB > 0 && facts.ramGB <= 8 && (facts.pageInitMB === -1 || facts.pageInitMB < 8192)) {
     problems.push("页面文件偏小（8 GB 机器建议固定 8192 MB 起）");
   }
@@ -428,8 +477,13 @@ export async function collectDoctor(state: State): Promise<{ sections: Section[]
 
   const sections: Section[] = [
     {
-      title: "版本",
+      title: "实例",
       rows: [
+        {
+          label: "选中实例",
+          value: instance === null ? "未选中" : instanceLabel(instance),
+          tone: instance ? "green" : "red",
+        },
         {
           label: "当前版本",
           value: version ? version.name : "未选择",
@@ -437,13 +491,13 @@ export async function collectDoctor(state: State): Promise<{ sections: Section[]
         },
       ],
     },
-    { title: sectionTitle("主机检查"), rows: hostRows(facts, state) },
+    { title: sectionTitle("主机检查"), rows: hostRows(facts, instance) },
     {
-      title: sectionTitle("实例"),
+      title: sectionTitle("实例进程"),
       rows: [
         {
           label: "运行中",
-          value: procs.length === 0 ? "无" : procs.map((p) => `占用 ${p.workingSetMB} MB`).join("、"),
+          value: procs.length === 0 ? "无" : procs.map((p) => `${p.pid} 占用 ${p.workingSetMB} MB`).join("、"),
         },
       ],
     },
@@ -476,8 +530,9 @@ const CAPABILITY_LABELS: Record<CapabilityId, string> = {
 
 /** 主机配置页的清单：每项都来自真实探测（开发模式下来自模拟状态文件），勾选状态即“当前是否已生效”。 */
 export async function collectCapabilities(state: State): Promise<Capability[]> {
-  const port = state.settings.port;
-  const facts = await collectHostFacts([port]);
+  const instance = selectedInstance(state);
+  const port = portOf(instance);
+  const facts = await collectHostFacts(portsOf(instance));
   if (!facts) {
     return CAPABILITY_ORDER.map((id) => ({
       id,

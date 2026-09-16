@@ -82,14 +82,14 @@ function CapabilityRow(props: { capability: Capability }): SolidChild {
 }
 
 /** 主机实况里**清单没有覆盖**的事实：内存、磁盘、端口占用。 */
-function factRows(facts: HostFacts, port: number): KeyValueRow[] {
+function factRows(facts: HostFacts): KeyValueRow[] {
   return [
     { label: "内存", value: `${facts.ramGB} GB`, mono: true },
     { label: "磁盘剩余", value: `${facts.diskFreeGB} GB`, mono: true },
     {
       label: "游戏端口",
-      value: facts.portInUse ? `UDP ${port} 已被占用（启动会失败）` : `UDP ${port} 空闲`,
-      tone: facts.portInUse ? "danger" : "success",
+      value: facts.portInUse ? "已配置的端口族中存在占用（可能是运行中的实例）" : "所有已配置端口族空闲",
+      tone: facts.portInUse ? "neutral" : "success",
     },
   ];
 }
@@ -113,7 +113,11 @@ function Page(): SolidChild {
       <PageHeader
         title="主机配置"
         icon="lucide:hard-drive"
-        description={`让这台机器扛得住长时间开服（游戏端口 UDP ${port()}）。`}
+        description={
+          store.selected()
+            ? `主机级设置；防火墙操作针对当前实例「${store.selected()!.name}」（游戏端口 ${port()}）。`
+            : "主机级信息；先选择实例，才能为其配置端口与启动任务。"
+        }
         actions={
           <View style={{ flexDirection: "row", alignItems: "center", gap: space.sm }}>
             <IconAction
@@ -127,7 +131,7 @@ function Page(): SolidChild {
               icon="lucide:zap"
               tone="info"
               variant="solid"
-              disabled={store.busy() !== null}
+              disabled={store.busy() !== null || !store.selected()}
               onPress={() => setConfirmApply(true)}
             />
           </View>
@@ -154,7 +158,9 @@ function Page(): SolidChild {
             subtitle="这里是只读探测结果，改动整批走「应用主机配置」"
           >
             {capabilities().length === 0 ? (
-              <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>还没读到任何一项：点右上角刷新。</Text>
+              <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>
+                {store.selected() ? "尚未读到配置状态，请刷新。" : "选择实例后检查防火墙和启动配置。"}
+              </Text>
             ) : (
               <View style={{ gap: space.sm }}>
                 {capabilities().map((capability) => (
@@ -174,7 +180,7 @@ function Page(): SolidChild {
             {facts() === null ? (
               <Text style={{ fontSize: fontSize.sm, color: palette.textDim }}>读不到这台机器的信息。</Text>
             ) : (
-              <KeyValueList rows={factRows(facts()!, port())} />
+              <KeyValueList rows={factRows(facts()!)} />
             )}
           </Card>
         </View>
@@ -184,7 +190,7 @@ function Page(): SolidChild {
       <Confirm
         open={confirmApply()}
         title="应用主机配置？"
-        message={`会弹管理员授权，一次改这几项：放行 UDP ${port()}、固定页面文件大小、排除杀毒软件、加上开机自启、切到高性能电源计划。被拒绝或跳过的步骤会写进动作记录。`}
+        message={`针对实例「${store.selected()?.name ?? ""}」会弹管理员授权，放行游戏 UDP ${port()} 与辅助端口、调整页面文件、添加 Defender 排除、配置启动任务及高性能电源计划。更改影响这台主机，失败会显示在操作记录中。`}
         confirmLabel="应用"
         onConfirm={() => {
           setConfirmApply(false);
