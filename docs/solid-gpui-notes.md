@@ -2,24 +2,41 @@
 
 更新时间：2026-09-17。当前子模块 pin 为 **`e5448f62cbdde66c67d9d073609a0fab185697c3`**（Windows Support），从 `fbd73f6` 升级。下方旧十条痛点记录的是此前 `66f17e0` → `fbd73f6` 的适配。
 
-证据分开记录：**本机实测**指本面板在 macOS 的运行；**上游记录**指 SDK 自己的示例/测试；**源码分析**不等于测出了性能或验证过 Windows。
+证据按平台分别记录；**上游记录**指 SDK 自己的示例/测试，**源码分析**不等于运行验收。下方历史阶段的分发方案已由最新单文件方案取代。
 
-## 根目录重整与启动路径修正
+## 根目录与严格单文件分发
 
-界面源码已合并进根 `src/`，原生宿主在根 `native/`，路由生成与 stage 在根 `scripts/`。根目录统一管理 package、依赖锁、TypeScript、Vite 与 Rust 工具链；下文历史记录的源码位置已按现布局更新。
+界面源码合并在根 `src/`，原生宿主在根 `native/`，路由生成与打包在根 `scripts/`。根目录统一管理 package、依赖锁、TypeScript、Vite 与 Rust 工具链；没有独立桌面工作区。
 
-- `bun run dev` / `bun run gui` 直接启动 Vite；模拟后端用 `bun run gui:dev`。不再要求切换目录，CLI 也不再使用 `--hot` 监听 Bun 缓存。
-- 源码 CLI 不带子命令时从程序目录启动 Vite；已编译 CLI 从自身同级启动 production 面板。模拟状态仍在 `.dev/r5f`，不作为可执行文件查找目录。
-- `src/paths.ts` 用模块 URL 定位源码根，兼容 Vite ModuleRunner；CLI 的编译命令显式定义 `R5_SERVER_COMPILED=true`，不靠 Bun 文件名猜测运行形态。
-- 首次构建先执行 `git submodule update --init --recursive`，再 `bun install`。PowerShell 5.1 的用户命令逐条执行；Bun package scripts 内部的 `&&` 由 Bun shell 处理。
+- 删除公共 CLI、转发启动器与 stage 流程。`bun run dev` / `bun run gui` 启动真实后端开发面板，`bun run gui:dev` 显式开启模拟。默认不模拟。
+- `bun run build` 默认生成 Windows x64 release `dist/r5-server.exe`：GPUI、自有宿主、Bun/JSC、GUI 与 worker 模块图静态链接为一个文件；不分发相邻 Bun/JS，不解包应用代码，不回退到磁盘源码。
+- 开发继续使用外部 Bun/stdin；发行版使用内嵌传输。同一个 EXE 的内部 `--worker` 承担配置、计划任务、日志守护与模拟引擎，保留独立生命周期；不是公共命令行界面。
+- `src/paths.ts` 优先使用宿主声明的程序目录，源码回退到模块 URL；数据父目录独立配置。原生入口每次重建 worker 参数与命令前缀，避免旧环境误选操作。
+- worker 完成通过 `R5WX` 帧携带完整状态，原生宿主同时检查 VM 终止状态，避免把 Windows 取消码 1223 截成 8 位状态。
+- JS 中间文件位于 `native/target/bundles/`。Windows 原生缓存使用用户目录下的项目独立短路径，避免 Ninja/cmd 的长路径失败；最终镜像与图验证后才原子发布到 `dist/`。
+- 原生清单复用仍验证固定提交、补丁、overlay 字节、目标/档位及所有链接输入；没有修改 vendored SDK 或绕过来源检查。
+- 首次构建先逐条执行 `git submodule update --init --recursive` 与 `bun install`；PowerShell 5.1 不使用粘贴的 `&&`。固定工具链与覆盖项见 README。
 
-本次目录重整验证：
+已完成的应用侧验证：
 
-- 根目录 `bun install --frozen-lockfile`、`bun run routes`、`bun run host:build`、`bun run gui:stage`、`bun run build`、`bun run check` 与 Rust 格式检查均通过；Bun 锁文件已移除桌面工作区，依赖版本保持不变。
-- `bun test src/state.test.ts`：2 passed。新增根路径回归先失败、后通过，覆盖自定义 Bun 文件名及无关工作目录；保留原并发状态写入回归。
-- macOS 从根目录执行无参数 `bun run dev:cli`，Vite 使用 `native/target/debug/r5-server-gui` 打开模拟面板，已观察实际页面。ModuleRunner 的 `import.meta.dir` 缺失曾阻断启动，改为模块 URL 后恢复；日志出现 native session ready / epoch 1。
-- 另将当前平台编译 CLI 改名，与原生宿主、JS 包复制到临时目录，不放 Vite 配置或源码，从无关 cwd 启动：在 `R5F_DEV=1` 下仍从 CLI 同级寻找宿主，CLI 返回 0，production 窗口显示总览。测试窗口及临时包已移除，未停止原有模拟实例。
-- Windows x64 CLI 已交叉编译；Windows 原生宿主与 PowerShell 5.1 未在本机运行验收。上游 Vite native-loader 与 Rust `block` 告警仍存在，未隐藏。
+- Windows x64 release：在 ARM64 Windows 11 的 x64 兼容层完成根目录构建，产物已复制到本仓库 `dist/r5-server.exe`，大小 **109396992 B**；SHA-256 为 `41dd36704915c8e0125ea33d2a5cda716df814b8b78fc951e43d78862300ad5c`。镜像校验了 x64 机器类型及 `B:/~BUN/root/app.js`、`B:/~BUN/root/worker.js` 两个入口，图摘要为 `22d50d80ce9d8f877e6d51a0c454eef789f04ce27d1a39c708f124afe4f02bd9`。
+- Windows 单文件迁移：只复制 EXE 并改名为含中文的文件，目录同时含空格；从 Windows 系统目录启动，PATH 仅保留系统路径，没有旁置 Bun/JS。已观察真实后端总览及正常关闭；最终产物的模拟窗口实测启动实例、关闭 GUI 后原 worker PID 8124 继续存活、重开后识别同一实例、输入 `status` 得到“引擎确认执行”与 hostname 回执、确认停止后显示 0 个运行实例且 worker 消失。测试窗口和控制进程均已退出，未停止其他实例。
+- Windows 真实管道：最终 EXE 的 `__logd` 使用真实 Windows 命名管道，拒绝错误令牌、接受正确令牌，将 `status` 转发至输入管道，并将 ANSI UTF-8 与 CP936 输出解码为准确的 `你好\n旧控制台中文\n`；所属测试进程退出、管道关闭后 daemon 返回 0。客户端及占位进程是探针，不是真实游戏引擎。
+- PE 普通及延迟导入表仅列 Windows 系统 DLL，没有 Bun 或 VC 运行库旁置依赖；运行验证仍发生在有开发工具的 Windows VM 中，不冒充全新系统认证。
+- Windows 计划任务参数：实测 PowerShell 5.1 会拆分带引号的 `/TR`；改为直接 argv 调用 `schtasks.exe` 后保持单个命令字符串，查询不存在的任务返回实际状态 1。此项没有创建、删除或触发真实计划任务。
+- macOS ARM64 debug：根目录单文件构建通过；仅复制并重命名可执行文件到含空格/中文的目录，从无关 cwd、无 Bun PATH 启动。
+- macOS 模拟：界面启动实例后关闭 GUI，worker 被 PID 1 接管且继续运行；重新打开面板后可观察并停止该实例。更新后的单文件 GUI 还实测执行 `status`，界面显示“引擎确认执行”及 hostname 回执，随后停止测试实例并正常退出。未停止其他已有实例。
+- macOS 内部 setup dry-run：忽略继承的错误 worker 参数；计划任务预览指向改名后的同一个文件及 `--worker start`。
+- Windows 11 / PowerShell 5.1 非提权日志中转：旧 `cmd /c` 实测展开 `%变量%` 参数；直接进程版本保持百分号、引号、空格、中文、空参数、换行与反斜杠，保留数据根，并发回收大于管道缓冲区的 UTF-8 stdout/stderr，返回原状态 47。此项未请求 UAC，不等同于提权验收。
+- 原生 worker 完成处理函数的隔离探针：9 个场景通过，覆盖完整 1223、成功、缺失/重复/损坏结果、VM 未完成、状态不一致与越界状态；不替代 Windows 实际取消提权验收。
+- 发布保护：前端和 worker 均打包完成后注入无效原生清单，构建在第 3 步失败；已发布 macOS 文件 SHA-256 保持 `3946a61dda2d5c37541cf955729efaefca3f9bdd51ea5ba15389a2c2b1a47cf3` 不变。
+- 根 `bun run check`、状态回归 2 项、SDK 定向回归 20 项 / 138 assertions 通过；开发宿主 Cargo 测试目标与 Rust 格式检查通过（宿主目前没有单元测试用例）。
+
+**未覆盖的系统验收：**本轮未批准 UAC 提权、修改主机安全配置或注册真实计划任务，也未启动真实游戏服务端。UAC 取消的完整 1223 目前由完成协议探针覆盖，提权中转由非提权进程探针覆盖；不能据此声称真实 UAC 取消、任务调度或真实游戏端到端已经通过。Windows 验证平台是 ARM64 Windows 11 上的 x64 EXE，不是独立 x64 物理机压力测试。
+
+## 历史阶段记录
+
+以下保留升级过程的证据边界；旁置运行时、CLI 和旧构建命令不再是当前使用方式。
 
 ## 2026-09-17：Windows Support 更新适配（目录重整前）
 

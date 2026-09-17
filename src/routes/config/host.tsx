@@ -2,8 +2,8 @@ import { type Capability, type CapabilityId, type HostFacts } from "@server/insp
 /**
  * 主机配置：本机为跑专用服务器要做的系统侧设置（防火墙 / 页面文件 / Defender / 自启 / 电源）。
  *
- * 面板**不自己改系统设置** —— 「应用主机配置」重新跑一遍仓库自己的 CLI（`setup`），
- * 由它去提权、去改，输出原样进动作记录。页面只负责如实显示探测结果。
+ * 面板**不自己改系统设置** —— 「应用主机配置」重新跑一遍内部 worker 的 `setup`
+ * （独立进程 + UAC 提权），由它去改，输出原样进动作记录。页面只负责如实显示探测结果。
  *
  * 版式约定（UI 重做后）：这里就是**主机事实的唯一出处**（体检页只给结论 + 跳转过来）。
  * 本页把重复清掉了：清单给五项设置的状态，实况只留清单里没有的三条（内存 / 磁盘 / 端口占用），
@@ -105,7 +105,7 @@ function Page(): SolidChild {
   const missing = () => (facts() === null ? [] : missingItems(facts()!));
 
   async function applyHost(): Promise<void> {
-    await store.runCli(["setup", "--ports", String(port())], "应用主机配置");
+    await store.runWorker(["setup", "--ports", String(port())], "应用主机配置");
   }
 
   return (

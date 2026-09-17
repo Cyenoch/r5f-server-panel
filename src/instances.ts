@@ -201,7 +201,7 @@ export async function ensureWorkspace(
     return {
       ok: false,
       error: `工作副本的复制来源不能是它自己（${dir}）：换版本要从只读的安装目录复制。`,
-      hint: "这是内部状态不一致：r5-server instance show 看一下引擎目录，必要时删掉工作副本重试。",
+      hint: "这是内部状态不一致：在「服务器实例」页看一下引擎目录，必要时删掉工作副本重试。",
     };
   }
 
@@ -380,7 +380,7 @@ export function nextFreePort(state: State, preferred: number = defaultSettings.p
 /**
  * 启动互斥锁：同一个实例不允许多个启动流程同时进行。
  *
- * 两个 CLI 进程同时 `start` 同一个实例时，"先查进程再 spawn"的窗口足够长，两边都会
+ * 两个进程同时 `start` 同一个实例时，"先查进程再 spawn"的窗口足够长，两边都会
  * 各起一个引擎（端口只有一个能绑上，另一个变成幽灵进程）。锁文件写持有者 pid：
  * 持有者已经不在就是陈旧锁，直接接管，不会因为上次崩溃而永远锁死。
  */

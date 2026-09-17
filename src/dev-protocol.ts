@@ -10,17 +10,17 @@
  * 模拟引擎监听一个真实的 loopback 控制端口，停止请求一路走到引擎自己收尾（清定时器、
  * 关端口、删快照）为止 —— 要么确认它停了，要么明确说没停。
  *
- * 本模块只被 dev 路径引用（CLI 的隐藏命令、模拟引擎、Windows 适配层的 dev 分支）。
- * 两个进程都要用到的东西只有一个来源：这里的类型与常量。
+ * 本模块只被 dev 路径引用（内部 worker 的 `__dev-engine` / `__dev-stop`、模拟引擎、
+ * Windows 适配层的 dev 分支）。两个进程都要用到的东西只有一个来源：这里的类型与常量。
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { DEV_MODE, DEV_ROOT } from "./dev";
 import { type Runtime, type ServerInstance, type State, loadState } from "./state";
-import { isPidAlive, selfCommand } from "./tap";
+import { WORKER_OPS, isPidAlive, workerCommand, workerSpawnEnv } from "./tap";
 
-/** 模拟引擎写、面板与 CLI 读的运行标识。 */
+/** 模拟引擎写、面板读的运行标识。 */
 export type DevEngineSnapshot = {
   /** 模拟引擎进程的 pid。 */
   pid: number;
@@ -144,11 +144,9 @@ export const DEV_SENT = "OK sent";
 /** 停止命令与服务端的确认行（`OK sent` 之后的第二步）。 */
 export const DEV_STOP_COMMAND = "__dev_stop";
 export const DEV_STOP_ACK = "OK stopping";
-/** 隐藏 CLI 子命令名：`<self> __dev-stop <pid>`。 */
-export const DEV_STOP_CLI = "__dev-stop";
 
 const LOOPBACK = "127.0.0.1";
-/** 停止请求的总预算：够引擎收尾，又不至于让 CLI 卡住。 */
+/** 停止请求的总预算：够引擎收尾，又不至于让面板卡住。 */
 export const DEV_STOP_TIMEOUT_MS = 5000;
 /** dev_disconnect 丢连接后重试的间隔。 */
 const RETRY_DELAY_MS = 120;
@@ -256,17 +254,18 @@ export async function requestDevStop(pid: number, timeoutMs = DEV_STOP_TIMEOUT_M
 }
 
 /**
- * 同步版停止：起一个隐藏 CLI 子进程（`__dev-stop <pid>`）走完整流程，按退出码判定。
+ * 同步版停止：起一个隐藏的 worker 子进程（`__dev-stop <pid>`）走完整流程，按退出码判定。
  *
  * 同步是刻意的：调用方（Windows 适配层的 `killTree`）本身是同步接口。绝不在此处
  * `process.kill` —— 见文件头。
  */
 export function stopDevEngine(pid: number): boolean {
   if (!DEV_MODE || !Number.isInteger(pid) || pid <= 0) return false;
-  const result = Bun.spawnSync(selfCommand([DEV_STOP_CLI, String(pid)]), {
+  const result = Bun.spawnSync(workerCommand([WORKER_OPS.devStop, String(pid)]), {
     stdin: "ignore",
     stdout: "ignore",
     stderr: "ignore",
+    env: workerSpawnEnv(),
     timeout: SPAWN_TIMEOUT_MS,
   });
   return result.exitCode === 0;

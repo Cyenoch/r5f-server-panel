@@ -34,14 +34,15 @@ export default defineConfig({
       { find: "@solid-gpui/router", replacement: resolve(solid, "packages/solid-gpui-router/src/index.ts") },
       // 子路径必须排在裸包名前面，否则 `@solid-gpui/core/stdio` 会被当成目录。
       { find: "@solid-gpui/core/stdio", replacement: core("stdio.ts") },
+      { find: "@solid-gpui/core/embedded", replacement: core("embedded.ts") },
       { find: "@solid-gpui/core/runtime", replacement: core("runtime.ts") },
       { find: "@solid-gpui/core/native", replacement: core("native.ts") },
       { find: "@solid-gpui/core/motion", replacement: core("motion.ts") },
       { find: "@solid-gpui/core/jsx-runtime", replacement: core("jsx-runtime.ts") },
       { find: "@solid-gpui/core", replacement: core("index.ts") },
-      // 面板 API 与引擎逻辑都在仓库根的 src/ 下（CLI 与桌面端共用同一批实现）。
+      // 面板与后台 worker 共用根 src/ 下的业务实现。
       { find: "@server", replacement: resolve(root, "src") },
     ],
   },
-  build: { outDir: "dist", target: "esnext" },
+  build: { outDir: "native/target/bundles", target: "esnext" },
 });

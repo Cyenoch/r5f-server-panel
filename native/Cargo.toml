@@ -14,9 +14,13 @@ description = "R5Flowstate 服务端管理面板的原生宿主（solid-gpui）"
 name = "r5-server-gui"
 path = "src/main.rs"
 
+[features]
+embedded = ["solid-gpui/embedded-bun"]
+
 [dependencies]
 solid-gpui = { path = "../vendor/solid-gpui/crates/solid-gpui", features = ["gpui-component"] }
 gpui-component = { path = "../vendor/solid-gpui/vendor/gpui-kit/crates/component" }
+serde_json = "1"
 
 [profile.dev]
 debug = 1

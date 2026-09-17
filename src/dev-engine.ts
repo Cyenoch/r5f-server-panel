@@ -58,7 +58,7 @@ const MAX_PLO_VALUE = 256;
 const MAX_PLO_ENTRIES = 64;
 /** dev_disconnect 一次最多丢几个连接。 */
 const MAX_DROPS = 10;
-/** 同时挂着的控制连接上限（面板 + CLI + 几条在途命令都够用）。 */
+/** 同时挂着的控制连接上限（面板 + 几条在途命令都够用）。 */
 const MAX_CLIENTS = 16;
 /** 退出码：1 参数/沙箱问题，2 启动失败，3 已有实例。 */
 const EXIT_USAGE = 1;
@@ -170,7 +170,7 @@ function realWithinRoot(target: string, root: string, label: string, code: numbe
   return real;
 }
 
-/** CLI 传进来的 JSON 可能是手工拼的：只用我们真会用的字段，坏值一律回落默认。 */
+/** 宿主传进来的 JSON 可能是手工拼的：只用我们真会用的字段，坏值一律回落默认。 */
 function coerceSettings(raw: Settings): Settings {
   const source = { ...defaultSettings, ...raw };
   const port = source.port;
@@ -215,7 +215,7 @@ function prepare(opts: DevEngineOptions): Prepared {
   const live = readDevEngineSnapshot(opts.instance);
   if (live && live.pid !== process.pid && isPidAlive(live.pid)) {
     throw new StartError(
-      `实例 ${opts.instance} 的模拟引擎已在运行（pid ${live.pid}，端口 ${live.port}）：先 r5-server stop，或 r5-server __dev-stop ${live.pid}`,
+      `实例 ${opts.instance} 的模拟引擎已在运行（pid ${live.pid}，端口 ${live.port}）：先在面板里停止该实例，或让守护进程收尾一次（worker __dev-stop ${live.pid}）。`,
       EXIT_INSTANCE,
     );
   }
@@ -576,7 +576,7 @@ class DevEngine {
    * 封禁：实测**静默**（`ban "1"` 一个字都不回）。
    *
    * 落盘的是本地模拟名单（真机 schema 未知，面板只做原样呈现）：`<版本目录>/banlist.json`
-   * 正是 `r5-server banlist` 的第一个候选路径，所以面板能看到它。是否顺带把玩家踢下线
+   * 正是面板封禁名单读的第一个候选路径，所以面板能看到它。是否顺带把玩家踢下线
    * 属于**未实测**的效果 —— 这里不假装，只记名单。
    */
   private addBan(target: string): void {
@@ -707,7 +707,7 @@ class DevEngine {
   }
 
   /**
-   * `dev_disconnect`：让接下来 N 次（默认 1 次）控制通道连接被**立刻断开**，面板/CLI
+   * `dev_disconnect`：让接下来 N 次（默认 1 次）控制通道连接被**立刻断开**，面板
    * 会看到"控制通道连接失败"。监听端口不受影响 —— 下一次连接就能恢复，`__dev_stop`
    * 也仍然走得通（`requestDevStop` 会在预算内重试一次）。
    */
@@ -737,7 +737,7 @@ class DevEngine {
     return count;
   }
 
-  /** userid / id64 / 名字都能命中（面板与 CLI 就是这么传的）。 */
+  /** userid / id64 / 名字都能命中（面板就是这么传的）。 */
   private findPlayer(token: string): Player | undefined {
     const lower = token.toLowerCase();
     return this.players.find(

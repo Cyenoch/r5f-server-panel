@@ -2,7 +2,7 @@
  * 开发模式（R5F_DEV=1）的模拟主机。
  *
  * 面板的宿主是 Windows：进程表、UDP 端口、物理内存、防火墙、计划任务、电源计划
- * 全走 PowerShell/CIM。开发模式把这层整体换掉，让 CLI/TUI 能在 macOS 上跑真实交互
+ * 全走 PowerShell/CIM。开发模式把这层整体换掉，让 macOS 上也能跑真实交互
  * （真设置、真文件、真 TCP 控制通道），同时**绝不动真实系统**：查询读的是
  * `.dev/r5f` 下的假 JSON，写操作也只写那一个假文件。
  *
@@ -21,7 +21,7 @@ import { DEV_ROOT } from "./dev";
 import { type DevEngineSnapshot, liveDevEngineSnapshots } from "./dev-protocol";
 import type { HostFacts } from "./inspect";
 import { ROOT } from "./state";
-import { selfCommand } from "./tap";
+import { WORKER_OPS, windowsArg, workerCommand } from "./tap";
 import { dim, green, header, kv, yellow } from "./ui";
 import { asRecord } from "./util";
 import { discoverVersions } from "./versions";
@@ -123,7 +123,7 @@ export function devFirewallRuleExists(displayName: string): boolean {
 
 /**
  * 模拟主机「已配置了什么」。真实主机这些状态散落在防火墙 / CIM / 计划任务里；
- * 开发模式把它们收进一个假 JSON —— 每次 CLI 调用都是新进程，只有文件能跨进程记住
+ * 开发模式把它们收进一个假 JSON —— 每次调用都是新进程，只有文件能跨进程记住
  * 主机配置页的勾选，这也正是验收里「配置改动要活过子进程」的那条。
  */
 type DevHostState = {
@@ -211,8 +211,8 @@ export function collectDevHostFacts(ports: number[]): HostFacts {
 
 /** 和 commands.ts 的 taskCommandLine 同形：真实计划任务会执行的那条命令行。 */
 function taskCommand(extraArgs: string[]): string {
-  return selfCommand(["start", "--detach", ...extraArgs])
-    .map((part) => (part.includes(" ") ? `"${part}"` : part))
+  return workerCommand([WORKER_OPS.start, ...extraArgs])
+    .map(windowsArg)
     .join(" ");
 }
 
@@ -350,7 +350,7 @@ export function autostartDevHost(opts: AutostartOptions, defaultPort: number): n
   if (opts.action === "status") {
     if (host.taskState.length === 0 || host.taskName !== taskName) {
       console.log(yellow(`  计划任务「${taskName}」不存在（模拟）。`));
-      console.log(dim("  开启：r5-server autostart enable"));
+      console.log(dim("  开启：在「主机环境」页点「应用主机配置」（会默认建登录时启动的任务）"));
       return 1;
     }
     kv("任务名", host.taskName);

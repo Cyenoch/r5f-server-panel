@@ -14,11 +14,8 @@ loader.dll
 *.tsbuildinfo
 dist/
 
-# 桌面端：原生宿主与阶段化产物（由 bun run gui:stage 放到仓库根）
+# 原生宿主与构建中间产物
 /native/target/
-/r5-server-gui.exe
-/r5-server-gui
-/r5-server-gui.js
 /src/generated/
 /src/routeTree.gen.ts
 

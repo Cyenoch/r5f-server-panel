@@ -33,7 +33,5 @@
     "src/routeTree.gen.ts",
     "src/generated/**",
     "native/target/**",
-    // 构建后拷到根目录的 JS 包。
-    "r5-server-gui.js",
   ],
 }

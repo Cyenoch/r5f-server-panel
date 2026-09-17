@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 /**
- * Hosted console tap: the same protocol the R5Flowstate launcher uses.
+ * Hosted console tap + 内部 worker 的重新进入契约。
  *
  * server.dll honours four environment variables when it starts:
  *   R5F_HOSTED_CONSOLE=1
@@ -11,13 +11,14 @@ import { randomUUID } from "node:crypto";
  * The engine writes its console output into that pipe instead of only into its
  * own console window, which is what makes real log streaming possible.
  *
- * The pipe owner has to outlive the CLI (output must keep flowing after the
- * operator closes the terminal), so it runs as a detached `__logd` child that
- * appends every line to a log file. `logs -f` tails that file.
+ * The pipe owner has to outlive the panel (output must keep flowing after the
+ * operator closes the window), so it runs as a detached worker child (`__logd`)
+ * that appends every line to a log file; the log page tails that file.
  */
 import { appendFileSync, existsSync, mkdirSync, openSync, readSync, statSync, closeSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import { type ModerationEntry, dueEntries, loadModeration, markUnbanned } from "./moderation";
 
@@ -197,9 +198,9 @@ export async function runLogDaemon(opts: LogDaemonOptions): Promise<number> {
   const idleDeadline = 10 * 60 * 1000;
 
   /**
-   * 临时封禁到期：由守护（而不是某个已退出的 CLI）把 `unban "<id64>"` 写进引擎输入管道。
+   * 临时封禁到期：由守护（而不是某个已经退出的进程）把 `unban "<id64>"` 写进引擎输入管道。
    * 这是"封 30 分钟"里"到点解封"那一半 —— 不写这句，台账上的到期就是假的。
-   * 解封行同时记进日志分片，好让 `logs` / 面板按时间线看见它。
+   * 解封行同时记进日志分片，好让面板按时间线看见它。
    */
   const sweepExpiredBans = (): void => {
     if (!opts.root || !engineInput) return;
@@ -265,47 +266,135 @@ export function isPidAlive(pid: number): boolean {
   }
 }
 
+// ------------------------------------------------------- internal worker 契约
+//
+// 面向服主的入口只有一个：桌面面板。但有三类活必须在**独立进程**里跑 —— 提权与
+// 系统级改动（主机配置 / 自启）、计划任务触发的启动、后台常驻的日志守护与模拟引擎。
+// 它们全部以 `<宿主前缀> <操作> [参数...]` 重新进入 `src/worker-entry.ts`：
+//
+//   打包：<r5-server.exe> --worker setup --ports 37015
+//   源码：bun run <仓库>/src/worker-entry.ts setup --ports 37015
+//
+// 前缀由宿主给（`R5_SERVER_DAEMON`）：打包后的面板进程是 GUI，`process.argv` 是面板
+// 自己的；源码运行时解释器是 bun、参数里得带上入口文件。这两种差别只有宿主知道。
+
+/** 宿主给的 worker argv 前缀（JSON 数组）：`workerCommand()` 的唯一权威来源。 */
+export const DAEMON_ENV = "R5_SERVER_DAEMON";
+/** 只有打包（嵌入式）进程才为 `1`：区分"参数在环境里"与"参数在 argv 里"。 */
+export const PACKAGED_ENV = "R5_SERVER_PACKAGED";
+/** 打包宿主把 `--worker` 之后的参数镜像成 JSON 数组（嵌入运行看不到原始 argv）。 */
+export const WORKER_ARGS_ENV = "R5_SERVER_WORKER_ARGS";
+/** 打包宿主重新进入 worker 的 argv 标记。 */
+export const WORKER_MARKER = "--worker";
+
 /**
- * Command line that re-enters this CLI (used to spawn the detached log daemon).
- *
- * Compiled: the executable itself. Under `bun run src/cli.tsx` the executable is
- * bun, so the script has to be passed explicitly.
+ * 内部 worker 的操作名。这些字符串**跨进程**（计划任务里钉死的就是它们），
+ * 所以只在唯一的登记表里写一遍：spawn 侧与 worker 侧的写错会在类型层面失配。
  */
-export function selfCommand(extraArgs: string[]): string[] {
-  return [...daemonPrefix(), ...extraArgs];
+export const WORKER_OPS = {
+  setup: "setup",
+  autostart: "autostart",
+  start: "start",
+  logDaemon: "__logd",
+  devEngine: "__dev-engine",
+  devStop: "__dev-stop",
+} as const;
+
+/** 打包（嵌入式）进程：宿主设的标记，不靠猜可执行文件叫什么名字。 */
+export function isPackaged(): boolean {
+  return process.env[PACKAGED_ENV] === "1";
 }
 
 /**
- * 重新进入 CLI 的 argv 前缀。
+ * 重新进入内部 worker 的完整命令行。
  *
- * 从 `r5-server.exe` 或 `bun run src/cli.tsx` 自己启动时看 `process.execPath` 就够；
- * 但桌面端的宿主进程是 GUI，`process.argv[1]` 是面板 JS 而不是 CLI，所以宿主用
- * `R5_SERVER_DAEMON`（JSON 数组）显式告诉子进程该跑什么 —— 那段前缀必须原样保留。
- *
- * Bun 的可执行名不止 `bun` / `bun.exe`：本机（vite-plus 装的 Bun）叫 `bun.native`。
- * 少认一个名字，`run <script>` 就会漏掉，子进程会把参数当脚本名去找
- * （`error: Script not found "__dev-engine"`）。名字逐个精确匹配：编译产物也叫
- * 别的名字，宽前缀会把它们错当解释器。
+ * 前缀只认宿主给的 `R5_SERVER_DAEMON`；没有它（源码里直接跑、或开发时不经宿主起
+ * Vite）时按运行形态兜底：源码是"用当前解释器跑 worker 入口文件"，打包是宿主自己的
+ * `--worker` 模式。这里刻意**不**看 `process.execPath` 的文件名去猜是不是 bun：
+ * 名字认少一个，子进程就会把操作名当成脚本名去找（`Script not found "__logd"`）。
  */
-function daemonPrefix(): string[] {
-  const configured = process.env.R5_SERVER_DAEMON;
-  if (configured) {
-    try {
-      const parsed: unknown = JSON.parse(configured);
-      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((part) => typeof part === "string")) {
-        return parsed;
-      }
-    } catch {
-      /* 坏值退回自省 */
+export function workerCommand(extraArgs: string[]): string[] {
+  return [...workerPrefix(), ...extraArgs];
+}
+
+function workerPrefix(): string[] {
+  const parsed = jsonStringArray(process.env[DAEMON_ENV]);
+  if (parsed !== null && parsed.length > 0) return parsed;
+  // 与本文件同目录的 worker 入口：源码运行时它就在（`src/worker-entry.ts`），
+  // 打包后不存在 —— 那正是"该走宿主自己的 --worker 模式"的判据。
+  const entry = fileURLToPath(new URL("./worker-entry.ts", import.meta.url));
+  if (!isPackaged() && existsSync(entry)) return [process.execPath, "run", entry];
+  return [process.execPath, WORKER_MARKER];
+}
+
+/**
+ * worker 进程自己的参数（不含宿主前缀）。
+ *
+ * 打包时**只**读宿主镜像的环境变量：嵌入运行里 argv 不是原始那份，而
+ * `R5_SERVER_WORKER_ARGS` 是宿主为这一次调用设的。源码运行永远走 argv ——
+ * 否则从打包的父进程继承下来的旧参数会盖掉自己的参数。
+ */
+export function workerArgs(): string[] {
+  if (isPackaged()) {
+    const mirrored = jsonStringArray(process.env[WORKER_ARGS_ENV]);
+    if (mirrored !== null) return mirrored;
+  }
+  return process.argv.slice(2);
+}
+
+/**
+ * 给子进程的环境：**删掉**继承来的 `R5_SERVER_WORKER_ARGS`。
+ *
+ * 它是"当前这次调用"的参数镜像，只对当前进程有意义；子进程的参数由它自己的 argv
+ * 前缀决定。宿主每次调用都会重设这个变量，这里只是不给脏值任何继承的机会。
+ */
+export function workerSpawnEnv(extra: Record<string, string> = {}): Record<string, string> {
+  const env = { ...process.env, ...extra } as Record<string, string>;
+  delete env[WORKER_ARGS_ENV];
+  return env;
+}
+
+/** JSON 字符串数组；不是这个形状就当没给（宿主给了坏值不该让子进程乱跑）。 */
+function jsonStringArray(raw: string | undefined): string[] | null {
+  if (raw === undefined || raw.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((part) => typeof part === "string")) return parsed;
+  } catch {
+    /* 坏值当没给 */
+  }
+  return null;
+}
+
+/**
+ * 按 Windows 的参数规则给一段参数加引号（`CommandLineToArgvW` 认的形式）。
+ *
+ * 需要它的都是"把一整条 worker 命令行交给别人"的地方：`schtasks /TR`、`Start-Process`
+ * 的 `-ArgumentList`（PowerShell 只把数组用空格拼起来，不替你加引号）。引号与反斜杠要
+ * 一起处理，否则含空格的路径会断成两段、JSON 参数里的引号会跑掉。
+ *
+ * 放在这里（而不是 `win.ts`）是因为 win.ts ↔ dev-host.ts 互相引用：计划任务的两处
+ * 构造（commands.ts 与 dev-host.ts）都要用它，放在共用叶子模块才不会造出新的环。
+ */
+export function windowsArg(part: string): string {
+  if (part.length > 0 && !/[\s"]/.test(part)) return part;
+  let out = '"';
+  let backslashes = 0;
+  for (const char of part) {
+    if (char === "\\") {
+      backslashes += 1;
+      continue;
     }
+    if (char === '"') {
+      // 引号前的反斜杠要翻倍，再加一个转义引号。
+      out += `${"\\".repeat(backslashes * 2 + 1)}"`;
+      backslashes = 0;
+      continue;
+    }
+    out += "\\".repeat(backslashes) + char;
+    backslashes = 0;
   }
-  const exe = process.execPath;
-  const leaf = exe.split(/[\\/]/).pop()?.toLowerCase() ?? "";
-  if (leaf === "bun" || leaf === "bun.exe" || leaf === "bun.native") {
-    const script = process.argv[1];
-    if (script && existsSync(script)) return [exe, "run", script];
-  }
-  return [exe];
+  return `${out}${"\\".repeat(backslashes * 2)}"`;
 }
 
 /** Last `count` lines of a file, read from the tail without loading everything. */

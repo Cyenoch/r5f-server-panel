@@ -24,7 +24,7 @@
 
   // correctness：确凿的错误，默认就是 error，显式写出来便于审阅。
   // suspicious：很可能出错 —— 一律 error，避免告警堆积后被无视。
-  // perf：能明显更省的写法 —— 单文件 82 MB 的 CLI，值得盯。
+  // perf：能明显更省的写法；GUI 和长期后台进程都需要避免无谓开销。
   // pedantic / style / restriction / nursery 不启用：
   // 风格交给 oxfmt，其余两类误报率高。
   "categories": {
@@ -34,7 +34,7 @@
   },
 
   "rules": {
-    // 模块图里的环会让求值顺序变成隐式契约：19 个模块的 CLI 里必须为零。
+    // 模块图里的环会让求值顺序变成隐式契约，业务模块必须保持无环。
     "import/no-cycle": "error",
 
     // 本项目到处 spawn 进程、写文件；漏掉 await 的 Promise 是最真实的故障源。
@@ -52,7 +52,7 @@
     // 又没有 schema 校验器 —— 开着这条规则只会把人逼回被禁的写法。
     "typescript/no-unsafe-type-assertion": "off",
 
-    // 本 CLI 的循环等待几乎都是「轮询引擎就绪」「顺序下发命令」这类
+    // 后台操作的循环等待几乎都是「轮询引擎就绪」「顺序下发命令」这类
     // 必须串行的动作，并行反而是错的（例如必须等进程绑定端口才能探下一个）。
     // 逐个加行内 disable 只会把源码弄脏，所以在配置里统一关掉。
     "no-await-in-loop": "off"
@@ -70,8 +70,6 @@
     "dist/**",
     // solid-gpui 子模块：第三方源码，有自己的 lint/format 约定，不归本仓库管。
     "vendor/**",
-    // scripts/stage.ts 拷到根目录的 JS 包（与 r5-server.exe 同级的产物）。
-    "r5-server-gui.js",
     // 路由生成产物：文件头明确要求排除在 linter/formatter 之外。
     "src/routeTree.gen.ts",
     // 由宿主 --export-native 生成的原生契约，同样是产物。

@@ -1,42 +1,24 @@
 /**
- * Read-only data collectors shared by the CLI commands and the TUI.
+ * Read-only data collectors shared by the panel.
  *
- * Everything here is async: the TUI renders on a timer, and a synchronous
- * PowerShell call in that path makes keystrokes feel dead.
+ * Everything here is async: the panel refreshes on a timer, and a synchronous
+ * PowerShell call in that path stalls the render loop.
  *
  * 开发模式（R5F_DEV=1）下主机来源换成本机假数据（`dev-host.ts`）；页面上凡是由
  * 假数据得出的地方都带「模拟」字样 —— 面板宁可说得啰嗦，也不让人把模拟数据当真。
  */
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { DEV_MODE, DEV_ROOT } from "./dev";
+import { DEV_MODE } from "./dev";
 import { collectDevHostFacts } from "./dev-host";
-import { instanceLabel, portFamily } from "./instances";
-import {
-  type ServerMetrics,
-  currentVersion,
-  describe,
-  formatUptime,
-  gameStateLabel,
-  parseServerTitle,
-  summariseLog,
-} from "./serverinfo";
+import { portFamily } from "./instances";
+import { currentVersion } from "./serverinfo";
 import { ROOT, type Runtime, type ServerInstance, type State, defaultSettings, selectedInstance } from "./state";
 import { isPidAlive, stripAnsi } from "./tap";
 import { asRecord, readTextIfPresent } from "./util";
 import * as win from "./win";
-
-export type Tone = "green" | "yellow" | "red" | "dim";
-export type Row = { label: string; value: string; tone?: Tone };
-export type Section = { title: string; rows: Row[] };
-
 const POWER_HIGH_PERFORMANCE = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c";
 const AUTOSTART_TASK = "R5F Dedicated Server";
-
-/** 模拟数据的页面标题：只在开发模式下加后缀，真实运行的文案一字不动。 */
-function sectionTitle(title: string): string {
-  return DEV_MODE ? `${title}（模拟）` : title;
-}
 
 /** 端口：选中实例的设置端口；没有实例时用默认设置（体检/主机页要一个可说的数）。 */
 function portOf(instance: ServerInstance | null): number {
@@ -51,11 +33,6 @@ function portsOf(instance: ServerInstance | null): number[] {
   return portFamily(portOf(instance));
 }
 
-/** 某个进程属于哪个实例（按运行记录里的 pid 认）；认不出来返回 null。 */
-function instanceOfPid(state: State, pid: number): ServerInstance | null {
-  return state.instances.find((instance) => instance.runtime?.pid === pid) ?? null;
-}
-
 /**
  * 日志写入方是否还活着。
  *
@@ -67,11 +44,6 @@ export function logSinkAlive(runtime: Runtime | null): boolean {
   if (!runtime) return false;
   if (runtime.logdPid !== undefined) return isPidAlive(runtime.logdPid);
   return DEV_MODE && isPidAlive(runtime.pid);
-}
-
-/** 这一档运行记录里**应当**有日志写入方：托管控制台（真实）或模拟引擎（开发）。 */
-function logSinkExpected(runtime: Runtime | null): boolean {
-  return runtime !== null && (runtime.logdPid !== undefined || DEV_MODE);
 }
 
 // --------------------------------------------------------------- json guards
@@ -169,200 +141,10 @@ export async function collectHostFacts(ports: number[]): Promise<HostFacts | nul
   };
 }
 
-// ------------------------------------------------------------------ sections
-
-function liveInstanceRows(instance: ServerInstance | null, proc: win.ProcInfo, ports: string[]): Row[] {
-  const metrics = parseServerTitle(proc.title);
-  const rows: Row[] = [];
-  rows.push({
-    label: "实例",
-    value: instance === null ? `(不在记录里) pid ${proc.pid}` : `${instance.name}（${instance.version ?? "未选版本"}）`,
-  });
-  rows.push({
-    label: "进程",
-    value: proc.startedAt ? `pid ${proc.pid} 启动于 ${proc.startedAt}` : `pid ${proc.pid} 运行中`,
-  });
-  const uptime = formatUptime(instance?.runtime?.startedAt ?? "", proc.startedAt);
-  if (uptime) rows.push({ label: "运行时长", value: uptime });
-  if (metrics.players) rows.push({ label: "人数", value: metrics.players });
-  if (metrics.map) rows.push({ label: "当前地图", value: metrics.map });
-  if (metrics.cpuPercent) rows.push({ label: "服务端 CPU", value: `${metrics.cpuPercent}%` });
-  if (metrics.frameMs) rows.push({ label: "帧耗时", value: `${metrics.frameMs} msec  帧号 ${metrics.frame ?? "-"}` });
-  rows.push({
-    label: "内存",
-    value: `${proc.workingSetMB} MB 工作集 / ${proc.privateMB} MB 私有提交`,
-  });
-  rows.push({ label: "CPU 时间", value: `${Math.round(proc.cpuSeconds)} 秒` });
-  rows.push({ label: "监听 UDP", value: ports.join(", ") || "(无)" });
-  if (instance?.runtime?.live) {
-    rows.push({
-      label: "引擎回报的模式",
-      value: `${instance.runtime.live.playlist} on ${instance.runtime.live.map}（${instance.runtime.live.at}）`,
-    });
-  }
-  return rows;
-}
-
-function logRows(instance: ServerInstance | null, metrics: ServerMetrics): Row[] {
-  const rows: Row[] = [];
-  const runtime = instance?.runtime ?? null;
-  const logFile = runtime?.logFile;
-  if (logFile && existsSync(logFile)) {
-    const summary = summariseLog(logFile);
-    if (!metrics.players) {
-      const stateLabel = gameStateLabel(summary.gameState);
-      if (stateLabel.length > 0) rows.push({ label: "游戏状态", value: stateLabel });
-      if (summary.mapInit) rows.push({ label: "已加载地图", value: summary.mapInit });
-    }
-    const size = statSync(logFile).size;
-    rows.push({
-      label: "日志",
-      value: `${Math.max(1, Math.round(size / 1024))} KB · 已写入到 ${summary.lastStamp ?? "?"} 秒`,
-    });
-  } else if (logFile) {
-    rows.push({ label: "日志", value: "尚未生成" });
-  } else {
-    rows.push({ label: "日志", value: "未启用托管控制台", tone: "yellow" });
-  }
-  const sinkAlive = logSinkAlive(runtime);
-  rows.push({
-    label: "日志记录",
-    value: sinkAlive ? "运行中" : logSinkExpected(runtime) ? "已停止（日志不再更新）" : "未启动",
-    tone: sinkAlive ? "green" : "yellow",
-  });
-  const ctlPort = runtime?.ctlPort ?? 0;
-  rows.push({
-    label: "远程管理",
-    value: ctlPort > 0 && sinkAlive ? "可用（查在线玩家 · 踢人 · 封禁 · 公告）" : "不可用（需要以托管方式启动）",
-    tone: ctlPort > 0 && sinkAlive ? "green" : "yellow",
-  });
-  return rows;
-}
-
-function hostRows(facts: HostFacts | null, instance: ServerInstance | null): Row[] {
-  const port = portOf(instance);
-  if (!facts) {
-    return [{ label: "主机信息", value: "读取失败（PowerShell 不可用）", tone: "red" }];
-  }
-  const pf = facts.pageInitMB === -1 ? "系统托管" : facts.pageInitMB === 0 ? "未配置" : `${facts.pageInitMB} MB 固定`;
-  const rows: Row[] = DEV_MODE
-    ? [{ label: "主机来源", value: `模拟主机（R5F_DEV=1 · ${DEV_ROOT}）`, tone: "yellow" }]
-    : [];
-  rows.push(
-    { label: "物理内存", value: `${facts.ramGB} GB` },
-    {
-      label: "页面文件",
-      value: pf,
-      tone:
-        facts.ramGB > 0 && facts.ramGB <= 8 && (facts.pageInitMB === -1 || facts.pageInitMB < 8192) ? "red" : undefined,
-    },
-    { label: "磁盘剩余", value: `${facts.diskFreeGB} GB` },
-    {
-      label: `UDP ${port}`,
-      value: facts.portInUse ? "已被占用" : "空闲",
-      tone: facts.portInUse ? "yellow" : "green",
-    },
-    {
-      label: "防火墙规则",
-      value:
-        facts.firewallMissing.length === 0
-          ? `已放行 ${port}`
-          : `缺少放行（UDP ${facts.firewallMissing.join(", ")}）→ 在「主机配置」按回车应用`,
-      tone: facts.firewallMissing.length === 0 ? "green" : "red",
-    },
-    {
-      label: "Defender",
-      value: facts.defenderExcluded ? "已排除根目录" : "未排除（可能导致服务端文件被误删）",
-      tone: facts.defenderExcluded ? "green" : "yellow",
-    },
-    {
-      label: "电源计划",
-      value: facts.powerHighPerformance ? "高性能" : "非高性能（换图/加载会慢）",
-      tone: facts.powerHighPerformance ? "green" : "yellow",
-    },
-    {
-      label: "开机自启",
-      value: facts.taskState.length === 0 ? "未配置" : `${facts.taskState}${triggerLabel(facts.taskTrigger)}`,
-      tone: facts.taskState.length === 0 ? undefined : "green",
-    },
-  );
-  return rows;
-}
-
 export function triggerLabel(cimClass: string): string {
   if (cimClass.includes("Logon")) return "（登录时）";
   if (cimClass.includes("Boot")) return "（开机时）";
   return "";
-}
-
-/** 详情页：状态总览。 */
-export async function collectDetail(state: State): Promise<Section[]> {
-  const sections: Section[] = [];
-  const instance = selectedInstance(state);
-  const version = currentVersion(state);
-  const s = instance?.settings ?? defaultSettings;
-  sections.push({
-    title: "实例与启动设置",
-    rows: [
-      {
-        label: "选中实例",
-        value: instance === null ? "未选中（先建一个：r5-server instance create）" : instanceLabel(instance),
-        tone: instance === null ? "red" : "green",
-      },
-      {
-        label: "当前版本",
-        value: version ? `${version.name}  ${describe(version)}` : "未选择（r5-server use <目录名>）",
-        tone: version ? "green" : "red",
-      },
-      {
-        label: "启动设置",
-        value: `UDP ${s.port} · 地图 ${s.map || "未指定"} · 模式 ${s.playlist || "未指定"} · 可见性 ${s.visibility === 0 ? "离线" : s.visibility === 1 ? "隐藏" : "公开"} · 认证 ${s.authMode === 0 ? "关闭" : s.authMode === 1 ? "强制校验" : "有就校验"}${s.password ? " · 有密码" : ""}`,
-      },
-      { label: "主机名", value: s.hostname || "(空)" },
-      { label: "配额", value: `${s.quotaString} 条命令/秒 · ${s.quotaScript} 个脚本/秒` },
-      { label: "附加参数", value: s.extra || "(空)" },
-      {
-        label: "模式模板",
-        value:
-          instance === null || instance.templateId === null
-            ? "未使用"
-            : (state.templates.find((t) => t.id === instance?.templateId)?.name ??
-              `(模板 ${instance.templateId} 不存在)`),
-      },
-    ],
-  });
-
-  const procs = (await win.findDediProcessesAsync()).filter((p) => p.path.toLowerCase().startsWith(ROOT.toLowerCase()));
-  if (procs.length === 0) {
-    sections.push({ title: sectionTitle("实例"), rows: [{ label: "进程", value: "未运行", tone: "dim" }] });
-  } else {
-    for (const proc of procs) {
-      const ports = await win.udpEndpointsAsync(proc.pid);
-      sections.push({
-        title: sectionTitle("实例"),
-        rows: liveInstanceRows(instanceOfPid(state, proc.pid), proc, ports),
-      });
-    }
-  }
-
-  const metrics = procs[0] ? parseServerTitle(procs[0].title) : {};
-  sections.push({ title: sectionTitle("日志"), rows: logRows(instance, metrics) });
-
-  const facts = await collectHostFacts(portsOf(instance));
-  sections.push({ title: sectionTitle("主机"), rows: hostRows(facts, instance) });
-
-  const last = state.history.slice(0, 4);
-  if (last.length > 0) {
-    sections.push({
-      title: "最近操作",
-      rows: last.map((h) => ({
-        label: h.action,
-        value: `${h.at.replace("T", " ").replace(/\..*$/, "")}Z  ${h.detail}`,
-        tone: "dim" as Tone,
-      })),
-    });
-  }
-  return sections;
 }
 
 // ------------------------------------------------------- current run health
@@ -442,7 +224,7 @@ export async function collectHealth(state: State): Promise<Health> {
   }
   if (latestOk) {
     if (error.bytes > 0) {
-      notes.push(`错误记录里有内容（${error.bytes} 字节）：本次运行出过问题，原文用 r5-server health 查看。`);
+      notes.push(`错误记录里有内容（${error.bytes} 字节）：本次运行出过问题，原文在「体检」页可以看到。`);
     } else {
       notes.push("错误记录是空的：本次运行没有出错。");
     }
@@ -450,59 +232,10 @@ export async function collectHealth(state: State): Promise<Health> {
       notes.push("启动记录有内容：这是改版服务端启动自检的正常输出，不是故障。");
     }
     if (scriptWarning.bytes > 0) {
-      notes.push("脚本侧有告警（不影响启动，需要时用 r5-server health 看原文）。");
+      notes.push("脚本侧有告警（不影响启动，需要时在「体检」页看原文）。");
     }
   }
   return { runId, runDir, latestOk, error, warning, scriptWarning, notes };
-}
-
-/** 体检页：和 collectDetail 同源，但只保留体检关心的项，并给出问题清单。 */
-export async function collectDoctor(state: State): Promise<{ sections: Section[]; problems: string[] }> {
-  const instance = selectedInstance(state);
-  const version = currentVersion(state);
-  const facts = await collectHostFacts(portsOf(instance));
-  const procs = (await win.findDediProcessesAsync()).filter((p) => p.path.toLowerCase().startsWith(ROOT.toLowerCase()));
-  const problems: string[] = [];
-
-  if (instance === null) problems.push("没有选中的实例（先 r5-server instance create）");
-  if (!version) problems.push("选中实例未选版本（r5-server use <目录名>）");
-  if (facts && facts.ramGB > 0 && facts.ramGB <= 8 && (facts.pageInitMB === -1 || facts.pageInitMB < 8192)) {
-    problems.push("页面文件偏小（8 GB 机器建议固定 8192 MB 起）");
-  }
-  if (facts && facts.firewallMissing.length > 0) problems.push("缺少 Windows 防火墙规则（主机配置页可一键放行）");
-  if (facts && !facts.defenderExcluded) problems.push("Defender 未排除根目录（可能导致服务端文件被误删）");
-  if (facts && !facts.powerHighPerformance) problems.push("电源计划非高性能（加载/换图更慢）");
-  if (facts && facts.diskFreeGB > 0 && facts.diskFreeGB < 30) problems.push("磁盘剩余不足 30 GB");
-  if (facts && facts.taskState.length === 0) problems.push("未配置开机自启（主机配置页可开启）");
-
-  const sections: Section[] = [
-    {
-      title: "实例",
-      rows: [
-        {
-          label: "选中实例",
-          value: instance === null ? "未选中" : instanceLabel(instance),
-          tone: instance ? "green" : "red",
-        },
-        {
-          label: "当前版本",
-          value: version ? version.name : "未选择",
-          tone: version ? "green" : "red",
-        },
-      ],
-    },
-    { title: sectionTitle("主机检查"), rows: hostRows(facts, instance) },
-    {
-      title: sectionTitle("实例进程"),
-      rows: [
-        {
-          label: "运行中",
-          value: procs.length === 0 ? "无" : procs.map((p) => `${p.pid} 占用 ${p.workingSetMB} MB`).join("、"),
-        },
-      ],
-    },
-  ];
-  return { sections, problems };
 }
 
 // --------------------------------------------------------------- capabilities

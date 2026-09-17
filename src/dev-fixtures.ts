@@ -86,7 +86,7 @@ const DEV_TEMPLATE: ModeTemplate = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
-/** Seed only missing files: edits and selection survive hot reloads and CLI subprocesses. */
+/** Seed only missing files: edits and selection survive hot reloads and worker subprocesses. */
 export function ensureDevFixtures(): void {
   if (!DEV_MODE) return;
   for (const version of ["r5f-dedi-1.0.13-dev", "r5f-dedi-1.0.14-dev"]) {

@@ -20,7 +20,7 @@ import type {
 } from "@server/panel";
 import * as api from "@server/panel";
 import type { FieldId } from "@server/settings-fields";
-import { selfCommand } from "@server/tap";
+import { workerCommand, workerSpawnEnv } from "@server/tap";
 import { metricHistory, sampleFleet, type FleetRow } from "@server/telemetry";
 /**
  * 面板的会话状态：一份进程内单例，装着从磁盘与运行实例读来的数据，以及改动它们的动作。
@@ -29,7 +29,7 @@ import { metricHistory, sampleFleet, type FleetRow } from "@server/telemetry";
  *  - **快**（3 s，无重叠）：实例进程指标、日志增量、选中实例玩家；每 10 s 留一份统计采样。
  *  - **慢**（按需）：主机体检、本次运行健康、版本目录体积 —— 每次要跑 PowerShell 或扫盘。
  *
- * 所有写操作都走 `src/panel.ts`（= CLI 同一套实现），成功/失败都落成一条 `notice`，
+ * 所有写操作都走 `src/panel.ts`（面板唯一的业务入口），成功/失败都落成一条 `notice`，
  * 界面只负责把 notice 显示出来，不各自编话术。
  */
 import { createSignal } from "@solid-gpui/core/runtime";
@@ -269,7 +269,7 @@ function createSession() {
     // error notice —— 这种情况下不能再补一句「已停止」，否则界面上会同时出现互相矛盾的两条。
     const result = await run("停止服务器", () => api.killInstance(state(), all));
     if (result === undefined) return;
-    // 与 CLI 的 `cmdStop` 同一套话术：0 个 = 本来就没在跑。
+    // 与后台停止路径同一套话术：0 个 = 本来就没在跑。
     notice("info", result > 0 ? `已停止 ${result} 个进程` : "没有正在运行的实例");
     await refreshState();
     await refreshFast();
@@ -425,14 +425,15 @@ function createSession() {
   }
 
   /**
-   * 跑一条 CLI 子命令（`setup` / `upgrade` / `autostart` 这类要提权或要交互的）。
-   * 输出原样进动作记录 —— 面板不重写这些命令的实现，避免两套行为。
+   * 跑一条**内部 worker 操作**（`setup` 这类要提权、要独立进程的）。
+   * 输出原样进动作记录 —— 面板不重写这些操作的实现，避免两套行为。
    */
-  async function runCli(args: string[], label: string): Promise<number | undefined> {
+  async function runWorker(args: string[], label: string): Promise<number | undefined> {
     return run(label, async () => {
       const proc = Bun.spawn({
-        cmd: selfCommand(args),
+        cmd: workerCommand(args),
         cwd: api.ROOT,
+        env: workerSpawnEnv(),
         stdout: "pipe",
         stderr: "pipe",
         stdin: "ignore",
@@ -520,7 +521,7 @@ function createSession() {
     clearLog,
     ledger: readLedger,
     loadBanlist,
-    runCli,
+    runWorker,
     pollLog,
     // 通知
     notice,

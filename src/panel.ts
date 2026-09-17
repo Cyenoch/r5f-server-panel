@@ -1,8 +1,8 @@
 /**
  * 面板 API：界面（`src/routes/`、`src/components/`）唯一的数据入口。
  *
- * 这里只做两件事：**取值**（把 CLI 共用的采集器整理成给界面用的形状）与**动作**
- * （调用 `commands.ts` 里那些同样驱动 CLI 的实现，返回结果而不是打印）。
+ * 这里只做两件事：**取值**（把共用采集器整理成给界面用的形状）与**动作**
+ * （调用 `commands.ts` 里的实现，返回结果而不是打印）。
  * 文案、颜色、布局一律不在这里 —— 界面自己决定怎么说。
  *
  * 之所以单独一层而不是让界面直接 import `commands.ts`：`cmd*` 是「打印 + 退出码」
@@ -427,7 +427,7 @@ export function settingsRows(settings: Settings): FieldValue[] {
   }));
 }
 
-/** 保存一批改动到**选中实例**（唯一入口就是 `commands.saveSettings`，CLI 与面板同路）。 */
+/** 保存一批改动到**选中实例**（唯一入口就是 `commands.saveSettings`，面板与 worker 同路）。 */
 export function updateSettings(
   state: State,
   changes: { id: FieldId; raw: string }[],
@@ -490,7 +490,7 @@ export async function saveAnnouncements(state: State, rows: Announcement[]): Pro
   if (!workspaceReady(instance)) {
     return {
       ok: false,
-      error: `实例「${instance.name}」还没有自己的引擎目录（工作副本）：先启动一次（r5-server start），再编辑公告文案 —— 否则改动会落到所有实例共用的安装目录里。`,
+      error: `实例「${instance.name}」还没有自己的引擎目录（工作副本）：先在「运行中」页启动一次，再编辑公告文案 —— 否则改动会落到所有实例共用的安装目录里。`,
     };
   }
   for (const [index, row] of rows.entries()) {

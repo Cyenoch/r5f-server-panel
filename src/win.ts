@@ -1,3 +1,4 @@
+import { dlopen, FFIType } from "bun:ffi";
 /**
  * Windows helpers: console setup (UTF-8 + ANSI via FFI), admin detection,
  * UAC self-elevation, PowerShell execution, process queries.
@@ -7,7 +8,10 @@
  * 宁可失败得明明白白，也不假装在 Windows 上执行过、更不在 macOS 上起一个
  * `powershell` 子进程。
  */
-import { dlopen, FFIType } from "bun:ffi";
+import { randomUUID } from "node:crypto";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DEV_MODE } from "./dev";
 import {
   devFindDediProcesses,
@@ -18,6 +22,7 @@ import {
   devUdpEndpoints,
 } from "./dev-host";
 import { stopDevEngine } from "./dev-protocol";
+import { workerCommand, windowsArg } from "./tap";
 
 const STD_OUTPUT_HANDLE = -11;
 const ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
@@ -80,9 +85,15 @@ export function ps(script: string, opts: { cwd?: string } = {}) {
   return run(psCommand(script), opts);
 }
 
+/** /TR 内含已加引号的命令行，不能再经过 PowerShell 5.1 的原生命令参数重写。 */
+export function schtasks(args: string[]) {
+  if (DEV_MODE) throw new Error(DEV_BLOCKED);
+  return run(["schtasks.exe", ...args]);
+}
+
 /**
- * Non-blocking variants. The TUI polls process/port state on a timer; using the
- * sync helpers there would stall the event loop and make keystrokes feel dead.
+ * Non-blocking variants. The panel polls process/port state on a timer; using the
+ * sync helpers there would stall the render loop.
  */
 async function runAsync(cmd: string[], opts: { cwd?: string } = {}) {
   const p = Bun.spawn({ cmd, cwd: opts.cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
@@ -111,18 +122,62 @@ export function isAdmin(): boolean {
 }
 
 /**
- * Re-launch this executable elevated and wait for it, so the operator sees the
- * result in the same window. Returns the child exit code, or null when UAC was
- * declined (the shell reports 1223 = ERROR_CANCELLED).
+ * 提权后的 PowerShell 直接创建 worker，不经过会展开路径中 `%...%` 的 cmd。
+ * stdout/stderr 并行读取为 UTF-8，落入独立临时文件后交回 GUI；显式传递数据根和
+ * worker 前缀，不能依赖 RunAs 继承调用者环境。只有 Win32 的取消码 1223 返回 null。
  */
 export async function elevateSelf(args: string[]): Promise<number | null> {
   if (DEV_MODE) throw new Error(DEV_BLOCKED);
+  const [file, ...prefix] = workerCommand(args);
+  const log = join(tmpdir(), `r5f-elevate-${randomUUID().replace(/-/g, "")}`);
+  const out = `${log}.out.log`;
+  const err = `${log}.err.log`;
+  const inherited = ["R5_SERVER_ROOT", "R5_SERVER_APP_ROOT", "R5_SERVER_DAEMON"]
+    .filter((name) => process.env[name] !== undefined)
+    .map((name) => `$env:${name}=${psQuote(process.env[name]!)}`);
+  const elevated = [
+    "$ErrorActionPreference='Stop'",
+    "$utf8=[Text.UTF8Encoding]::new($false)",
+    "try {",
+    ...inherited,
+    "  $start=New-Object Diagnostics.ProcessStartInfo",
+    `  $start.FileName=${psQuote(file)}`,
+    `  $start.Arguments=${psQuote(prefix.map(windowsArg).join(" "))}`,
+    "  $start.UseShellExecute=$false",
+    "  $start.CreateNoWindow=$true",
+    "  $start.RedirectStandardOutput=$true",
+    "  $start.RedirectStandardError=$true",
+    "  $start.StandardOutputEncoding=$utf8",
+    "  $start.StandardErrorEncoding=$utf8",
+    "  $process=New-Object Diagnostics.Process",
+    "  $process.StartInfo=$start",
+    "  if (-not $process.Start()) { throw '无法启动提权 worker' }",
+    "  $stdout=$process.StandardOutput.ReadToEndAsync()",
+    "  $stderr=$process.StandardError.ReadToEndAsync()",
+    "  $process.WaitForExit()",
+    `  [IO.File]::WriteAllText(${psQuote(out)}, $stdout.Result, $utf8)`,
+    `  [IO.File]::WriteAllText(${psQuote(err)}, $stderr.Result, $utf8)`,
+    "  exit $process.ExitCode",
+    "} catch {",
+    `  [IO.File]::WriteAllText(${psQuote(err)}, $_.ToString(), $utf8)`,
+    "  exit 1",
+    "}",
+  ].join("\n");
+  const elevatedArgs = psCommand(elevated, true).slice(1).map(windowsArg).join(" ");
   const script = [
     "$ErrorActionPreference='Stop'",
     "try {",
-    `  $p = Start-Process -FilePath ${psQuote(process.execPath)} -ArgumentList @(${args.map(psQuote).join(",")}) -Verb RunAs -PassThru -Wait`,
+    `  $p=Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList ${psQuote(elevatedArgs)} -Verb RunAs -WindowStyle Hidden -PassThru -Wait`,
     "  exit $p.ExitCode",
-    "} catch { exit 1223 }",
+    "} catch {",
+    "  $exception=$_.Exception",
+    "  while ($exception) {",
+    "    if ($exception -is [ComponentModel.Win32Exception] -and $exception.NativeErrorCode -eq 1223) { exit 1223 }",
+    "    $exception=$exception.InnerException",
+    "  }",
+    "  [Console]::Error.WriteLine($_.ToString())",
+    "  exit 1",
+    "}",
   ].join("\n");
   const child = Bun.spawn({
     cmd: psCommand(script, true),
@@ -131,7 +186,21 @@ export async function elevateSelf(args: string[]): Promise<number | null> {
     stdin: "inherit",
   });
   const code = await child.exited;
+  relayElevated(out, "stdout");
+  relayElevated(err, "stderr");
   return code === 1223 ? null : code;
+}
+
+/** 转发提权那一支的输出。没有文件 = 它什么都没说（用户取消 / 起不来），按退出码说话。 */
+function relayElevated(log: string, stream: "stdout" | "stderr"): void {
+  try {
+    const text = readFileSync(log, "utf8").replace(/\s+$/, "");
+    if (text.length > 0) process[stream].write(`${text}\n`);
+  } catch {
+    /* 没有中转文件：不假装提权那一支说过什么 */
+  } finally {
+    rmSync(log, { force: true });
+  }
 }
 
 export type ProcInfo = {
@@ -231,7 +300,7 @@ export function killTree(pid: number): boolean {
 }
 
 /**
- * One query, two spawn modes: the CLI runs it synchronously, the dashboard
+ * One query, two spawn modes: the worker runs it synchronously, the panel
  * asynchronously so a slow PowerShell call cannot stall the render loop.
  */
 function udpEndpointsQuery(pid: number): string {

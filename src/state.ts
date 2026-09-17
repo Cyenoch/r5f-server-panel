@@ -1,10 +1,10 @@
 /**
- * Persistent state for the r5-server CLI: the named server instances (each with
+ * Persistent state for r5-server: the named server instances (each with
  * its own version, launch settings and mode template), the saved mode
  * templates, which instance is selected, and an operation history for auditing.
  *
  * 一个实例 = 一条记录（`ServerInstance`）。「正在运行的进程」属于实例（`runtime`），
- * 不再有全局单例 —— 同一台机器上可以同时跑多个实例，CLI 与面板的每个动作都作用在
+ * 不再有全局单例 —— 同一台机器上可以同时跑多个实例，面板的每个动作都作用在
  * **选中的那一个**（`selectedInstanceId`）上。
  *
  * 旧状态文件（`current`/`settings`/`profiles`/`runtime` 那套单实例形状）在这里一次性
@@ -144,7 +144,7 @@ export type State = {
   templates: ModeTemplate[];
   selectedInstanceId: string | null;
   history: HistoryEntry[];
-  /** 面板上次停在哪一页：桌面端重开时回到原处，CLI 不读也不写。 */
+  /** 面板上次停在哪一页：桌面端重开时回到原处，worker 不读也不写。 */
   panelRoute?: string;
 };
 
@@ -413,7 +413,7 @@ function freshState(): State {
 /**
  * 把旧状态文件（单实例 + 档案）迁移成实例列表。
  *
- * 档案 → 实例（名字沿用档案名）；正在生效的档案拿到 `state.settings`（那是 CLI 唯一
+ * 档案 → 实例（名字沿用档案名）；正在生效的档案拿到 `state.settings`（那是旧版本唯一
  * 读过的值）与当时的运行记录，其余实例只拿各自的档案设置。版本只有一个（`current`），
  * 所以每个迁移出来的实例都指向它。
  */
@@ -491,7 +491,7 @@ export function loadState(): State {
   if (legacy) {
     if (!insideCommit) return serializeState(loadState);
     const migrated = migrateLegacy(raw);
-    // 迁移结果**立刻落盘**：实例 id 是随机生成的，只放在内存里的话每个 CLI 进程都会
+    // 迁移结果**立刻落盘**：实例 id 是随机生成的，只放在内存里的话每个进程都会
     // 重新迁移出另一套 id（工作副本、选中项、日志前缀全都对不上）。旧字段同时被清掉。
     saveState(migrated);
     return migrated;
@@ -576,6 +576,6 @@ export function selectedInstance(state: State): ServerInstance | null {
 /** 选中的实例；没有就抛错（调用方要的是"明确说没有选中"，不是静默回退）。 */
 export function requireInstance(state: State): ServerInstance {
   const instance = selectedInstance(state);
-  if (!instance) throw new Error("没有选中的实例：先用 r5-server instance select <名字> 选一个。");
+  if (!instance) throw new Error("没有选中的实例：先在「服务器实例」页选一个。");
   return instance;
 }

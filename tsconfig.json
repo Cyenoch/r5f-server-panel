@@ -15,6 +15,7 @@
       "@solid-gpui/core": ["./vendor/solid-gpui/packages/solid-gpui/src/index.ts"],
       "@solid-gpui/core/runtime": ["./vendor/solid-gpui/packages/solid-gpui/src/runtime.ts"],
       "@solid-gpui/core/stdio": ["./vendor/solid-gpui/packages/solid-gpui/src/stdio.ts"],
+      "@solid-gpui/core/embedded": ["./vendor/solid-gpui/packages/solid-gpui/src/embedded.ts"],
       "@solid-gpui/core/native": ["./vendor/solid-gpui/packages/solid-gpui/src/native.ts"],
       "@solid-gpui/core/motion": ["./vendor/solid-gpui/packages/solid-gpui/src/motion.ts"],
       "@solid-gpui/core/components": ["./src/generated/native.ts"],
