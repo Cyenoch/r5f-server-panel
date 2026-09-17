@@ -15,11 +15,12 @@ loader.dll
 dist/
 
 # 桌面端：原生宿主与阶段化产物（由 bun run gui:stage 放到仓库根）
-/desktop/native/target/
+/native/target/
 /r5-server-gui.exe
+/r5-server-gui
 /r5-server-gui.js
-/desktop/src/generated/
-/desktop/src/routeTree.gen.ts
+/src/generated/
+/src/routeTree.gen.ts
 
 # ── 运行时状态（机器本地：pid / ctlToken / 明文密码 / 绝对路径）─────
 /r5-server.json

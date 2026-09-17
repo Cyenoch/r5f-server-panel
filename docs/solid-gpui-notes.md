@@ -4,7 +4,24 @@
 
 证据分开记录：**本机实测**指本面板在 macOS 的运行；**上游记录**指 SDK 自己的示例/测试；**源码分析**不等于测出了性能或验证过 Windows。
 
-## 2026-09-17：Windows Support 更新适配
+## 根目录重整与启动路径修正
+
+界面源码已合并进根 `src/`，原生宿主在根 `native/`，路由生成与 stage 在根 `scripts/`。根目录统一管理 package、依赖锁、TypeScript、Vite 与 Rust 工具链；下文历史记录的源码位置已按现布局更新。
+
+- `bun run dev` / `bun run gui` 直接启动 Vite；模拟后端用 `bun run gui:dev`。不再要求切换目录，CLI 也不再使用 `--hot` 监听 Bun 缓存。
+- 源码 CLI 不带子命令时从程序目录启动 Vite；已编译 CLI 从自身同级启动 production 面板。模拟状态仍在 `.dev/r5f`，不作为可执行文件查找目录。
+- `src/paths.ts` 用模块 URL 定位源码根，兼容 Vite ModuleRunner；CLI 的编译命令显式定义 `R5_SERVER_COMPILED=true`，不靠 Bun 文件名猜测运行形态。
+- 首次构建先执行 `git submodule update --init --recursive`，再 `bun install`。PowerShell 5.1 的用户命令逐条执行；Bun package scripts 内部的 `&&` 由 Bun shell 处理。
+
+本次目录重整验证：
+
+- 根目录 `bun install --frozen-lockfile`、`bun run routes`、`bun run host:build`、`bun run gui:stage`、`bun run build`、`bun run check` 与 Rust 格式检查均通过；Bun 锁文件已移除桌面工作区，依赖版本保持不变。
+- `bun test src/state.test.ts`：2 passed。新增根路径回归先失败、后通过，覆盖自定义 Bun 文件名及无关工作目录；保留原并发状态写入回归。
+- macOS 从根目录执行无参数 `bun run dev:cli`，Vite 使用 `native/target/debug/r5-server-gui` 打开模拟面板，已观察实际页面。ModuleRunner 的 `import.meta.dir` 缺失曾阻断启动，改为模块 URL 后恢复；日志出现 native session ready / epoch 1。
+- 另将当前平台编译 CLI 改名，与原生宿主、JS 包复制到临时目录，不放 Vite 配置或源码，从无关 cwd 启动：在 `R5F_DEV=1` 下仍从 CLI 同级寻找宿主，CLI 返回 0，production 窗口显示总览。测试窗口及临时包已移除，未停止原有模拟实例。
+- Windows x64 CLI 已交叉编译；Windows 原生宿主与 PowerShell 5.1 未在本机运行验收。上游 Vite native-loader 与 Rust `block` 告警仍存在，未隐藏。
+
+## 2026-09-17：Windows Support 更新适配（目录重整前）
 
 - **接入方式不变**：本次未修改 TS 组件、router/Vite 插件 API、宿主 profile 入口或工具链版本。保留外部 Bun + `ProcessAdapter` / `StdioTransport`、自有 Cargo 宿主及 `native:` 绑定导出；重新构建宿主并生成绑定，Bun 与 Cargo 锁文件无需调整。
 - **Windows 修复随子模块引入（源码分析）**：debug 渲染器将 HLSL 及 include 嵌入 EXE，从内存编译，不再读取构建机源码目录；Windows 资源 manifest 通过绝对路径宏传给资源编译器。已有 `gpui-pre` / `gpui-pre-windows` path patch 覆盖这两处，无需应用侧补丁。旧 EXE 必须重建，单换 JS 无法得到修复。[上游 Windows 排障说明](https://github.com/Cyenoch/solid-gpui/blob/e5448f62cbdde66c67d9d073609a0fab185697c3/docs/troubleshooting.zh-CN.md#windows-debug-启动时无法创建-directwritetextsystem)
@@ -16,7 +33,7 @@
 - `bun install --frozen-lockfile`：通过，无依赖变更。
 - `bun run check`：类型、规则与格式检查全部通过。
 - `bun run gui:build`：通过；重编原生宿主、重新导出绑定并构建 164 个模块。Vite native-loader 告警仍存在，未隐藏。
-- `cargo build --manifest-path desktop/native/Cargo.toml --locked`：通过；`block v0.1.6` future-incompatibility 告警仍存在。
+- 原生宿主 locked 构建：通过；当时尚未目录重整，当前等价入口为 `bun run host:build`。`block v0.1.6` future-incompatibility 告警仍存在。
 - SDK 定向回归：`native`、`control-flow`、`stdio-host-lifetime`、`application`、新增的 `scripts/solid-jsx.test.ts`，**20 passed / 0 failed，138 assertions**。使用 `--conditions=browser --preload ./vendor/solid-gpui/scripts/solid-jsx.ts`。
 - macOS 原生窗口：使用新构建的 debug 宿主和 production bundle，在独立模拟目录中冷启动；已观察总览首帧、模拟实例启动、玩家三行六列表格、机器人对话框、Select 通过 Down + Enter 从队伍 0 更新为队伍 1，以及设置页滚动后的内容位移。没有帧时间测量，不把内容位移当作性能基准。
 - Select 弹出选项仍为三个无名 AX `group`，旧 P1 未修复。Windows x64/MSVC、release 着色器、内嵌 Bun 与本轮开发期热重载未做运行验收；此前热重载结果仅作为历史记录。
@@ -55,8 +72,8 @@
 
 **改动（有界，仅此三处）**：
 
-- `desktop/src/components/shell.tsx`：主内容行加 `height: 0`，其内容列加 `width: 0`；
-- `desktop/src/routes/config/server.tsx`：右栏、字段当前值、编辑器包装加 `width: 0`；
+- `src/components/shell.tsx`：主内容行加 `height: 0`，其内容列加 `width: 0`；
+- `src/routes/config/server.tsx`：右栏、字段当前值、编辑器包装加 `width: 0`；
 - 保留原有最小尺寸、全部 14 项控件、文字换行与内容自然高度；未引入分页、虚拟列表、固定内容高度或布局缓存。
 
 **同时排除的假设**：`session.ts` 的 fast/slow 定时器只更新实例、玩家、日志与体检，不更新 settings/catalog；`PageScroll` 未订阅 `onScroll`，滚轮路径无需逐帧 JS 回传。所以不是“定时器反复重建全部设置编辑器”。运行中实例每 1.5 秒一次的窗口标题命令会触发一次整树重建，是独立的周期性小停顿，本次未处理。
@@ -123,7 +140,7 @@ list
 
 ## 2026-09-16 验证记录与边界（历史 pin `fbd73f6`）
 
-- `cargo build --manifest-path desktop/native/Cargo.toml --locked`：通过。
+- 原生宿主 locked 构建：通过（当前等价入口 `bun run host:build`）。
 - `bun run check`：类型、规则、格式全部通过。
 - `bun run gui:build`：通过，实际宿主重新导出了原生绑定。
 - SDK 定向回归：`native`、`control-flow`、`stdio-host-lifetime`、`application`，共 **19 passed / 0 failed，136 assertions**。命令需带 `--conditions=browser --preload ./vendor/solid-gpui/scripts/solid-jsx.ts`；漏掉 browser 条件会解析到 Solid SSR，不是上游回归。

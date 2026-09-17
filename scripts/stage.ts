@@ -3,17 +3,17 @@
 import { copyFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-const desktop = resolve(import.meta.dirname, "..");
-const root = resolve(desktop, "..");
+const root = resolve(import.meta.dirname, "..");
 const profile = process.argv.includes("--release") ? "release" : "debug";
 
-const host = resolve(desktop, "native", "target", profile, "r5-server-gui.exe");
+const name = process.platform === "win32" ? "r5-server-gui.exe" : "r5-server-gui";
+const host = resolve(root, "native", "target", profile, name);
 if (!existsSync(host))
   throw new Error(`缺少原生宿主，先跑：bun run host:build${profile === "release" ? ":release" : ""}`);
 
-const bundle = resolve(desktop, "dist", "app.js");
-if (!existsSync(bundle)) throw new Error("缺少 JS 包，先跑：bun run build");
+const bundle = resolve(root, "dist", "app.js");
+if (!existsSync(bundle)) throw new Error("缺少 JS 包，先跑：bun run gui:build");
 
-copyFileSync(host, resolve(root, "r5-server-gui.exe"));
+copyFileSync(host, resolve(root, name));
 copyFileSync(bundle, resolve(root, "r5-server-gui.js"));
-console.log(`已放入 ${root}：r5-server-gui.exe（${profile}）+ r5-server-gui.js`);
+console.log(`已放入 ${root}：${name}（${profile}）+ r5-server-gui.js`);

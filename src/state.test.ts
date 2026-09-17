@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 test("concurrent processes preserve every independent state update", async () => {
   const root = mkdtempSync(join(tmpdir(), "r5-state-concurrency-"));
@@ -30,5 +30,27 @@ test("concurrent processes preserve every independent state update", async () =>
     );
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("source execution does not use an interpreter installation as the instance root", async () => {
+  const unrelated = mkdtempSync(join(tmpdir(), "r5-interpreter-"));
+  try {
+    const source = `
+      process.execPath = ${JSON.stringify(join(unrelated, "bun-vite.exe"))};
+      // Import after changing execPath: the test exercises module-time root discovery.
+      const { ROOT } = await import(${JSON.stringify(join(import.meta.dir, "state.ts"))});
+      console.log(ROOT);
+    `;
+    const child = Bun.spawn([process.execPath, "-e", source], {
+      cwd: unrelated,
+      env: { ...process.env, R5F_DEV: "0", R5_SERVER_ROOT: "" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(0);
+    expect((await new Response(child.stdout).text()).trim()).toBe(resolve(import.meta.dir, ".."));
+  } finally {
+    rmSync(unrelated, { recursive: true, force: true });
   }
 });

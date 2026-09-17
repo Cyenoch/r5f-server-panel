@@ -1,14 +1,12 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
 /**
  * r5-server entry point.
  *
- *   r5-server                 help（交互式面板是 r5-server-gui.exe）
+ *   r5-server                 启动桌面面板
  *   r5-server gui             启动桌面面板
  *   r5-server <command>       commander-parsed subcommand, script friendly
  *   r5-server __logd ...      hidden hosted-console daemon
  *
- * Argument parsing: commander. 交互面板在 `desktop/`（solid-gpui），
+ * Argument parsing: commander. 交互面板在 `src/routes`（solid-gpui），
  * 命令实现两边共用 `commands.ts`，所以定时任务与人在面板上点的是同一套代码。
  */
 import { Command, CommanderError } from "commander";
@@ -47,6 +45,7 @@ import { DEV_MODE } from "./dev";
 import { runDevEngine } from "./dev-engine";
 import { ensureDevFixtures } from "./dev-fixtures";
 import { requestDevStop } from "./dev-protocol";
+import { launchGui } from "./gui";
 import { type FieldId } from "./settings-fields";
 import { ROOT, loadState, type Settings } from "./state";
 import { runLogDaemon } from "./tap";
@@ -559,9 +558,9 @@ function buildProgram(): Command {
   program
     .command("gui")
     .description("打开桌面面板（r5-server-gui.exe）")
-    .option("--production", "以发布模式启动（读 dist 里的 JS 包，而不是 Vite）")
+    .option("--production", "启动根目录的已构建面板与 JS 包，而不是 Vite")
     .action(async (opts: { production?: boolean }) => {
-      process.exitCode = launchGui(Boolean(opts.production));
+      process.exitCode = await launchGui(Boolean(opts.production));
     });
 
   // hidden: hosted-console daemon (spawned by `start`)
@@ -632,8 +631,8 @@ function buildProgram(): Command {
 
   // 不带子命令即打开桌面面板：这个 exe 对服主来说就是"服务器面板"，
   // 帮助仍然可以用 `--help` 显式取。
-  program.action(() => {
-    process.exitCode = launchGui(false);
+  program.action(async () => {
+    process.exitCode = await launchGui(false);
   });
 
   return program;
@@ -682,30 +681,6 @@ function settingsFromOptions(opts: Record<string, unknown>): SettingChange[] {
   return raw
     .filter((entry): entry is { id: FieldId; value: string } => entry.value !== undefined)
     .map((entry) => ({ id: entry.id, raw: entry.value }));
-}
-
-/**
- * 打开桌面面板：宿主进程独立存活，CLI 不等它结束（面板关掉不影响正在跑的实例）。
- * `--production` 只对开发构建有意义（不经过 Vite），发布形态本来就是 production。
- */
-function launchGui(production: boolean): number {
-  const exe = join(ROOT, "r5-server-gui.exe");
-  if (!existsSync(exe)) {
-    process.stderr.write(`${red(`找不到桌面面板：${exe}`)}\n`);
-    process.stderr.write("  从源码构建：cd desktop && bun install && bun run host:build && bun run stage\n");
-    return 1;
-  }
-  const child = Bun.spawn({
-    cmd: production ? [exe, "--production"] : [exe],
-    cwd: ROOT,
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "inherit",
-    detached: true,
-  });
-  child.unref();
-  console.log(`已启动桌面面板（pid ${child.pid}）。`);
-  return 0;
 }
 
 export async function main(): Promise<number> {

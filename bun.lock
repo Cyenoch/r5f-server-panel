@@ -5,26 +5,6 @@
     "": {
       "name": "r5-server",
       "dependencies": {
-        "commander": "^15.0.0",
-        "csv-parse": "^7.0.2",
-        "csv-stringify": "^6.8.3",
-        "dotenv": "^17.4.2",
-        "keyvalues-tools": "^1.1.0",
-        "shell-quote": "^1.10.0",
-        "string-width": "^8.2.2",
-      },
-      "devDependencies": {
-        "@types/bun": "^1.4.2",
-        "@types/shell-quote": "^1.7.5",
-        "oxfmt": "^0.67.0",
-        "oxlint": "^1.82.0",
-        "oxlint-tsgolint": "^7.0.2001",
-      },
-    },
-    "desktop": {
-      "name": "r5-server-desktop",
-      "version": "2.0.0",
-      "dependencies": {
         "@jridgewell/remapping": "2.3.5",
         "@jridgewell/trace-mapping": "0.3.31",
         "@solidjs/compiler": "2.0.0-rc.6",
@@ -33,14 +13,22 @@
         "@tanstack/router-generator": "1.167.34",
         "@tanstack/router-utils": "1.162.2",
         "bebop": "3.2.3",
+        "commander": "^15.0.0",
         "core-js-pure": "3.50.0",
+        "csv-parse": "^7.0.2",
+        "csv-stringify": "^6.8.3",
+        "dotenv": "^17.4.2",
         "event-target-shim": "6.0.2",
+        "keyvalues-tools": "^1.1.0",
         "oxc-transform": "0.148.0",
+        "shell-quote": "^1.10.0",
         "solid-js": "1.9.15",
+        "string-width": "^8.2.2",
         "vite": "8.2.2",
       },
       "devDependencies": {
         "@types/bun": "^1.4.2",
+        "@types/shell-quote": "^1.7.5",
         "oxfmt": "^0.67.0",
         "oxlint": "^1.82.0",
         "oxlint-tsgolint": "^7.0.2001",
@@ -403,8 +391,6 @@
     "postcss": ["postcss@8.5.28", "", { "dependencies": { "nanoid": "^3.3.18", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-RRuzqDtt5Y9h3quz5hWhK+TPnsmVs6WwSU6LkJMeY4HstUEDuYTG8UJSdawMRzmzAtV+KEoG8N3Qg2qLy5vM/A=="],
 
     "prettier": ["prettier@3.9.6", "", { "bin": { "prettier": "bin/prettier.cjs" } }, "sha512-OpN0zzVdiaiAhxpuuj5efpIS4sY9j7bY6uR5mnj5yPzGkdkjNKSJeUThPb60Jw29QuAZgA4o+/iB49kFiaBX6g=="],
-
-    "r5-server-desktop": ["r5-server-desktop@workspace:desktop"],
 
     "rolldown": ["rolldown@1.2.8", "", { "dependencies": { "@oxc-project/types": "=0.149.0", "@rolldown/pluginutils": "^1.0.0" }, "optionalDependencies": { "@rolldown/binding-android-arm-eabi": "1.2.8", "@rolldown/binding-android-arm64": "1.2.8", "@rolldown/binding-darwin-arm64": "1.2.8", "@rolldown/binding-darwin-x64": "1.2.8", "@rolldown/binding-freebsd-x64": "1.2.8", "@rolldown/binding-linux-arm-gnueabihf": "1.2.8", "@rolldown/binding-linux-arm64-gnu": "1.2.8", "@rolldown/binding-linux-arm64-musl": "1.2.8", "@rolldown/binding-linux-ppc64-gnu": "1.2.8", "@rolldown/binding-linux-s390x-gnu": "1.2.8", "@rolldown/binding-linux-x64-gnu": "1.2.8", "@rolldown/binding-linux-x64-musl": "1.2.8", "@rolldown/binding-openharmony-arm64": "1.2.8", "@rolldown/binding-win32-arm64-msvc": "1.2.8", "@rolldown/binding-win32-x64-msvc": "1.2.8" }, "bin": { "rolldown": "./bin/cli.mjs" } }, "sha512-Z67nTmhZe7anqnM/EjI392w5i/ANUinjip7QYsOyN37oayduxt3ksdX0hf5OOamkAd53BiIHfbfSzfUmzKFQqQ=="],
 

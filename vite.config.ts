@@ -2,11 +2,11 @@ import { resolve } from "node:path";
 import { defineConfig } from "vite";
 // 这两个包必须按路径导入：它们是 vendor/solid-gpui 工作区的成员，没有 npm 包可解析，
 // 而 Vite 配置本身在插件生效前就要被加载，用不了下面的 resolve.alias。
-import { solidGpuiRouter } from "../vendor/solid-gpui/packages/solid-gpui-router/src/vite.ts";
-import { solidGpui } from "../vendor/solid-gpui/packages/solid-gpui-vite/src/index.ts";
+import { solidGpuiRouter } from "./vendor/solid-gpui/packages/solid-gpui-router/src/vite.ts";
+import { solidGpui } from "./vendor/solid-gpui/packages/solid-gpui-vite/src/index.ts";
 
 const root = import.meta.dirname;
-const solid = resolve(root, "../vendor/solid-gpui");
+const solid = resolve(root, "vendor/solid-gpui");
 const core = (file: string) => resolve(solid, "packages/solid-gpui/src", file);
 
 export default defineConfig({
@@ -40,10 +40,8 @@ export default defineConfig({
       { find: "@solid-gpui/core/jsx-runtime", replacement: core("jsx-runtime.ts") },
       { find: "@solid-gpui/core", replacement: core("index.ts") },
       // 面板 API 与引擎逻辑都在仓库根的 src/ 下（CLI 与桌面端共用同一批实现）。
-      { find: "@server", replacement: resolve(root, "../src") },
+      { find: "@server", replacement: resolve(root, "src") },
     ],
   },
-  // 应用要直接复用仓库根的 src/*.ts（状态、引擎控制、目录解析），它们在工作区之外。
-  server: { fs: { allow: [root, resolve(root, "..")] } },
   build: { outDir: "dist", target: "esnext" },
 });

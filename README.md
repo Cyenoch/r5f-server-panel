@@ -25,8 +25,8 @@
 | 系统       | Windows x64（Windows Server 2022 验证过；进程/端口/防火墙/提权全部走 PowerShell 与 Win32 API，无 Linux 路径） |
 | 服务端内容 | 一个 `r5f-dedi-x.y.z` 目录，根目录须同时含 `r5apex_ds.exe` + `server.dll` + `loader.dll`                      |
 | 内存       | 每实例预留 **3.2 GB 工作集 / 6.5 GB 提交**；8 GB 机器必须设固定页面文件（`setup` 会做）                       |
-| 运行面板   | 无需运行时，`r5-server.exe` 是 Bun 编译的单文件                                                               |
-| 从源码构建 | [Bun](https://bun.sh)（见[开发](#开发)）                                                                      |
+| 运行面板   | CLI 为 Bun 编译的单文件；图形面板还需同级原生宿主、JS 包，以及同级或 PATH 中的 Bun                            |
+| 从源码构建 | Bun、Git 子模块、根目录指定的 Rust 工具链；Windows 需 MSVC C++ Build Tools 与 Windows SDK（见[开发](#开发)）  |
 
 ## 快速开始
 
@@ -77,9 +77,11 @@
 
 ### 面板的运行方式
 
-`r5-server.exe` 只是启动器（编译产物，无运行时依赖）；真正的界面是一个原生宿主 `r5-server-gui.exe` 加它的 Bun 子进程 `r5-server-gui.js`。三者必须在同一目录 —— 打包发布时一起带上，源码构建时由 `bun run --cwd desktop stage` 摆好。
+`r5-server.exe` 是 CLI 与面板启动器（编译产物，无运行时依赖）；真正的界面是一个原生宿主 `r5-server-gui.exe` 加它的 Bun 子进程 `r5-server-gui.js`。三者必须在同一目录，Bun 可放在同级或加入 PATH。源码构建时在项目根运行 `bun run build` 与 `bun run gui:stage` 摆好。发布 CLI 总是启动 production 宿主，不依赖构建机上的 Vite 或源码路径。
 
 宿主进程被强杀（任务管理器、崩溃）时，上游默认 `StdioTransport` 会随宿主管道的 EOF 或读错误退出渲染器，不再由应用定时探测父进程。面板启动的游戏服务器与日志守护是 `detached` 进程，**关掉面板不会带走正在跑的服务器**。
+
+源码开发直接在根目录运行 `bun run dev` / `bun run gui`，模拟后端用 `bun run gui:dev`。`bun run cli` 或 `bun run dev:cli` 不带子命令时也会启动 Vite；带子命令时运行 CLI。程序目录独立于 `R5_SERVER_ROOT` 和 `.dev/r5f` 数据目录，不会到数据目录或 Bun 安装目录寻找面板。
 
 ## 命令参考
 
@@ -330,9 +332,26 @@ r5-server\
 
 ## 开发
 
+所有命令都从项目根目录执行；只有一份 `package.json`、`bun.lock` 与 `tsconfig.json`，不需要切换子项目目录。
+
+```text
+src/                 CLI、共享业务逻辑与界面入口 app.tsx
+  routes/            页面
+  components/        UI 组件
+  lib/               界面会话与主题
+native/              Rust 原生宿主与 Cargo.lock
+scripts/             路由生成与发布产物摆放
+vendor/solid-gpui/    固定提交的上游子模块
+vite.config.ts       根目录 Vite 接入
+rust-toolchain.toml  根目录 Rust 工具链
+```
+
 ```powershell
+git submodule update --init --recursive
 bun install
 bun run dev                    # 源码方式运行面板（改代码即时生效）
+bun run cli --help             # 真实后端 CLI 帮助
+bun run dev:cli status         # 模拟后端 CLI（不打开窗口）
 bun run build                  # 编译单文件 r5-server.exe（bun-windows-x64，minify）
 bun update --latest            # 依赖升到最新（受下面那条 24 小时冷却期约束）
 ```
@@ -413,22 +432,31 @@ Windows 防火墙、页面文件、Defender、电源与自启只读写模拟状�
 | `inspect.ts`         | 面板数据采集：详情、体检、主机能力、运行健康                                         |
 | `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源、UAC      |
 
-界面代码在 `desktop/`：`src/routes/` 是页面，`src/components/` 是共用积木，`src/lib/` 是会话 store，`native/` 是原生宿主（Rust）。它只通过 `src/panel.ts` 与上面的逻辑层交互。
+界面与业务模块统一放在根 `src/`：`src/routes/` 是页面，`src/components/` 是共用积木，`src/lib/` 是会话 store；根 `native/` 是原生宿主（Rust）。界面通过 `src/panel.ts` 与业务逻辑层交互。
 
 ### 桌面端（面板）的构建
 
-界面用 [solid-gpui](https://github.com/Cyenoch/solid-gpui) 写：JS/TS 跑逻辑，原生宿主负责渲染。仓库把 solid-gpui 作为**浅克隆子模块**放在 `vendor/solid-gpui`（`git submodule update --init --depth 1`）。
+界面用 [solid-gpui](https://github.com/Cyenoch/solid-gpui) 写：JS/TS 跑逻辑，原生宿主负责渲染。仓库把 solid-gpui 作为固定提交的子模块放在 `vendor/solid-gpui`。首次克隆或更新代码后先补齐子模块；`bun install` 只安装 JS 依赖，不会下载 Rust 源码子模块。
 
 ```powershell
+# 以下在项目根目录逐条执行；某一步失败就先处理，不继续后续步骤。
+git submodule update --init --recursive
 bun install
+bun run build                  # 编译 Windows x64 CLI
 bun run gui:stage              # 构建 bundle + 编译宿主 + 把 exe/js 摆到仓库根
 .\r5-server-gui.exe --production
 
-# 日常开发（Vite 自带宿主进程与热重载）
-bun run gui
+# 日常开发无需 stage：自动构建宿主、生成绑定并启动 Vite
+bun run dev
+# 本地模拟服务器（不连接真实玩家）
+bun run gui:dev
 ```
 
-需要 Rust 工具链（`desktop/rust-toolchain.toml` 指定版本，覆盖 Vite 与 native 两种构建入口，cargo 会自动拉）。`desktop/src/generated/native.ts` 与 `desktop/src/routeTree.gen.ts` 都是构建产物，不入库，`gui`/`gui:stage` 会自动生成。
+需要 Rust 工具链（根 `rust-toolchain.toml` 指定版本，cargo 会自动拉）。Windows 还需要 Visual Studio C++ Build Tools（MSVC）与 Windows SDK。`src/generated/native.ts` 与 `src/routeTree.gen.ts` 都是构建产物，不入库，`dev` / `gui:build` / `gui:stage` 会自动生成。
+
+根目录也可单独运行 `bun run host:build`、`bun run host:build:release`、`bun run routes`。`bun run gui:stage:release` 构建 release 宿主、生成 JS 包并摆放到根目录；Windows release 需要 SDK 的 `fxc.exe`。package scripts 里的 `&&` 由 Bun shell 执行，兼容 Windows PowerShell 5.1；不要在 PowerShell 提示符里粘贴多条 `&&` 命令。
+
+若 Cargo 报 `vendor/solid-gpui/vendor/gpui-kit/crates/component/Cargo.toml` 不存在，先在根目录重新运行 `git submodule update --init --recursive`，不要反复运行 Cargo 或 Bun 安装。旧 CLI 的 `--hot` 曾对 Bun 缓存中的 `shell-quote/parse.js` 报监听警告；现在 `dev` 使用 Vite，CLI 不使用该监听器。
 
 当前 solid-gpui 子模块 pin 为 `e5448f6`（Windows Support）。历史痛点的修复状态、已删除的临时绕法、仍需上游处理的问题与验证范围见
 [docs/solid-gpui-notes.md](docs/solid-gpui-notes.md)。
@@ -458,27 +486,28 @@ bun run fmt                    # 写回格式
 
 ## 模块地图（`src/`）
 
-| 文件                 | 职责                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------ |
-| `cli.tsx`            | commander 入口；所有子命令；help 中文化（输出层）                                    |
-| `commands.ts`        | 命令实现：启动/停止/重启/升级/设置/玩家/控制台/日志…；构造启动参数；控制通道客户端   |
-| `state.ts`           | 实例、模板、选择指针与历史记录；旧数据迁移、跨进程串行提交、原子文件替换             |
-| `versions.ts`        | 版本目录发现、备份、切换                                                             |
-| `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源           |
-| `tap.ts`             | `__logd` 日志守护：管道、日志文件、控制口；日志尾部/增量读（水位线）                 |
-| `inspect.ts`         | 详情、体检、主机能力与健康数据采集                                                   |
-| `settings-fields.ts` | **唯一**的设置项声明表：渲染、校验、CLI、面板共用                                    |
-| `panel.ts`           | 面板稳定 API：实例生命周期、模板、日志、玩家、公告、健康、封禁                       |
-| `catalog.ts`         | 从版本目录读真实清单：地图名、playlist、模式目录（按家族分组）                       |
-| `cfg.ts`             | 读/校验/行级重写引擎 cfg（`shell-quote` 解析）                                       |
-| `serverinfo.ts`      | 日志摘要与 status 头部解析                                                           |
-| `gui.ts`             | 面板启动器：定位 `r5-server-gui.exe` 并分离启动（`desktop/` 是它加载的 JS/原生宿主） |
-| `instances.ts`       | 实例工作副本、端口族与启动排他锁                                                     |
-| `releases.ts`        | 官方文件名版本发现、下载、校验、解压与原子安装                                       |
-| `mode-templates.ts`  | 源码验证过的玩法参数及生效时机                                                       |
-| `telemetry.ts`       | 实际采样与本地历史曲线                                                               |
+| 文件                 | 职责                                                                               |
+| -------------------- | ---------------------------------------------------------------------------------- |
+| `cli.tsx`            | commander 入口；所有子命令；help 中文化（输出层）                                  |
+| `commands.ts`        | 命令实现：启动/停止/重启/升级/设置/玩家/控制台/日志…；构造启动参数；控制通道客户端 |
+| `state.ts`           | 实例、模板、选择指针与历史记录；旧数据迁移、跨进程串行提交、原子文件替换           |
+| `versions.ts`        | 版本目录发现、备份、切换                                                           |
+| `win.ts`             | Windows 探测与动作：进程、端口、防火墙、页面文件、Defender、计划任务、电源         |
+| `tap.ts`             | `__logd` 日志守护：管道、日志文件、控制口；日志尾部/增量读（水位线）               |
+| `inspect.ts`         | 详情、体检、主机能力与健康数据采集                                                 |
+| `settings-fields.ts` | **唯一**的设置项声明表：渲染、校验、CLI、面板共用                                  |
+| `panel.ts`           | 面板稳定 API：实例生命周期、模板、日志、玩家、公告、健康、封禁                     |
+| `catalog.ts`         | 从版本目录读真实清单：地图名、playlist、模式目录（按家族分组）                     |
+| `cfg.ts`             | 读/校验/行级重写引擎 cfg（`shell-quote` 解析）                                     |
+| `serverinfo.ts`      | 日志摘要与 status 头部解析                                                         |
+| `gui.ts`             | 面板启动器：源码走根目录 Vite，发布走 CLI 同级原生宿主                             |
+| `paths.ts`           | 程序目录与显式编译标记；不混用状态目录或 Bun 安装目录                              |
+| `instances.ts`       | 实例工作副本、端口族与启动排他锁                                                   |
+| `releases.ts`        | 官方文件名版本发现、下载、校验、解压与原子安装                                     |
+| `mode-templates.ts`  | 源码验证过的玩法参数及生效时机                                                     |
+| `telemetry.ts`       | 实际采样与本地历史曲线                                                             |
 
-界面代码不在 `src/` 下，而在 `desktop/src/`：路由、外壳、会话 store、UI 组件；`desktop/native/` 是原生宿主（Rust）。二者只通过 `src/panel.ts` 与 `src/*.ts` 的逻辑层交互。
+界面入口 `src/app.tsx`、路由、组件与共享业务代码都属于同一个 TypeScript 项目；`native/` 是原生宿主（Rust）。`scripts/`、Vite 与 Rust 工具链配置都在根目录，不再有独立桌面工作区。
 
 ## 不变量（改代码时必须保持）
 

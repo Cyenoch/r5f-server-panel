@@ -70,12 +70,12 @@
     "dist/**",
     // solid-gpui 子模块：第三方源码，有自己的 lint/format 约定，不归本仓库管。
     "vendor/**",
-    // desktop/scripts/stage.ts 拷到根目录的 JS 包（与 r5-server.exe 同级的产物）。
+    // scripts/stage.ts 拷到根目录的 JS 包（与 r5-server.exe 同级的产物）。
     "r5-server-gui.js",
     // 路由生成产物：文件头明确要求排除在 linter/formatter 之外。
-    "desktop/src/routeTree.gen.ts",
+    "src/routeTree.gen.ts",
     // 由宿主 --export-native 生成的原生契约，同样是产物。
-    "desktop/src/generated/**",
-    "desktop/native/target/**"
+    "src/generated/**",
+    "native/target/**"
   ]
 }

@@ -14,9 +14,10 @@
 import { Database } from "bun:sqlite";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { DEV_MODE, DEV_ROOT } from "./dev";
 import type { ModeTemplate } from "./mode-templates";
+import { APP_ROOT } from "./paths";
 
 export type Visibility = 0 | 1 | 2;
 export type AuthMode = 0 | 1 | 2;
@@ -155,11 +156,7 @@ function detectRoot(): string {
   // 桌面端：宿主进程与 JS 子进程的 cwd/argv 都不是实例根目录，只能由宿主显式给出。
   const declared = process.env.R5_SERVER_ROOT;
   if (declared !== undefined && declared.trim().length > 0) return resolve(declared);
-  const base = basename(process.execPath).toLowerCase();
-  // Bun 的可执行名不止 `bun` / `bun.exe`：本机（vite-plus 装的 Bun）叫 `bun.native`。
-  // 逐名精确匹配：编译产物也叫别的名字，宽前缀会把它们错当成解释器。
-  if (base === "bun.exe" || base === "bun" || base === "bun.native") return resolve(import.meta.dir, "..");
-  return dirname(process.execPath);
+  return APP_ROOT;
 }
 
 export const ROOT = detectRoot();

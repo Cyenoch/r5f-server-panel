@@ -30,10 +30,10 @@
     // fmt 脚本关闭嵌套配置发现，防止子模块自己的配置覆盖此处排除项。
     "vendor/**",
     // 路由生成产物（文件头明确要求排除）。
-    "desktop/src/routeTree.gen.ts",
-    "desktop/src/generated/**",
-    "desktop/native/target/**",
-    // 由 desktop 构建后拷到根目录的 JS 包。
+    "src/routeTree.gen.ts",
+    "src/generated/**",
+    "native/target/**",
+    // 构建后拷到根目录的 JS 包。
     "r5-server-gui.js",
   ],
 }

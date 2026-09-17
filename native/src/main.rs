@@ -1,7 +1,7 @@
 //! R5Flowstate 服务端管理面板的原生宿主（solid-gpui）。
 //!
 //! 宿主只做三件事：开窗、选运行时、把**实例根目录**和 **CLI 入口**交给子进程。
-//! 业务逻辑全在 Bun 里跑的 TS（`desktop/src`），这里不注册任何 native module。
+//! 业务逻辑全在 Bun 里跑的 TS（`src/`），这里不注册任何 native module。
 //!
 //! 为什么用环境变量而不是 cwd：子进程的 cwd 由 Vite（开发）或启动方式（发布）决定，
 //! 不能用来定位 `r5-server.json`；而 `r5-server.json` 是所有状态与版本目录的锚点。
@@ -19,10 +19,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-/// 开发时这个 crate 在 `desktop/native`，实例根目录（放 `r5-server.json` 的那层）是仓库根。
-const DEV_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
-/// Vite 的根：`desktop/`。
-const VITE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+/// 开发时这个 crate 在 `native/`，Vite 与实例根目录都在仓库根。
+const DEV_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
 /// 发布时与宿主同级的 JS 包（`vite build` 的产物改名而来）。
 const BUNDLE: &str = "r5-server-gui.js";
 /// 与宿主同级的 CLI：日志守护（`__logd`）与脚本入口都由它承担。
@@ -110,7 +108,7 @@ fn production_runtime(root: &Path) -> Arc<dyn RuntimeAdapter> {
 
 /// 开发：交给 Vite 的模块通道；Vite 已经启动时这个 helper 会附加上去，不会再起一个服务。
 fn development_runtime(root: &Path) -> Arc<dyn RuntimeAdapter> {
-    let command = solid_gpui::runtime::vite::Vite::new(VITE_ROOT).command();
+    let command = solid_gpui::runtime::vite::Vite::new(DEV_ROOT).command();
     let mut command = command.unwrap_or_else(|error| {
         eprintln!("无法准备 Vite 运行时：{error}");
         std::process::exit(1);
