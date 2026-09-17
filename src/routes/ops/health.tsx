@@ -1,4 +1,3 @@
-import type { HostFacts } from "@server/inspect";
 /**
  * 体检：只回答两个问题 —— 这次运行出过错吗？这台机器还差什么？
  *
@@ -10,6 +9,7 @@ import type { HostFacts } from "@server/inspect";
  */
 import { Text, View, type SolidChild } from "@solid-gpui/core";
 import { createFileRoute, useNavigate } from "@solid-gpui/router";
+import type { HostFacts } from "#server/inspect";
 import {
   Action,
   Card,

@@ -23,23 +23,6 @@ export function parseJsonObject(text: string, what: string): JsonObject {
   return value as JsonObject;
 }
 
-export function stringField(source: JsonObject, key: string, what: string): string {
-  const value = source[key];
-  if (typeof value !== "string" || value.length === 0) fail(`${what} 不是非空字符串`);
-  return value;
-}
-
-export function stringListField(source: JsonObject, key: string, what: string): string[] {
-  const value = source[key];
-  if (!Array.isArray(value)) fail(`${what} 不是数组`);
-  const result: string[] = [];
-  for (const item of value) {
-    if (typeof item !== "string") fail(`${what} 含非字符串元素`);
-    result.push(item);
-  }
-  return result;
-}
-
 export function stringMapField(source: JsonObject, key: string, what: string): Record<string, string> {
   const value = source[key];
   if (typeof value !== "object" || value === null || Array.isArray(value)) fail(`${what} 不是 JSON 对象`);

@@ -1,3 +1,14 @@
+/**
+ * 面板的会话状态：一份进程内单例，装着从磁盘与运行实例读来的数据，以及改动它们的动作。
+ *
+ * 取数分两档：
+ *  - **快**（3 s，无重叠）：实例进程指标、日志增量、选中实例玩家；每 10 s 留一份统计采样。
+ *  - **慢**（按需）：主机体检、本次运行健康、版本目录体积 —— 每次要跑 PowerShell 或扫盘。
+ *
+ * 所有写操作都走 `src/panel.ts`（面板唯一的业务入口），成功/失败都落成一条 `notice`，
+ * 界面只负责把 notice 显示出来，不各自编话术。
+ */
+import { createSignal } from "@solid-gpui/core/runtime";
 import type {
   AnnouncementsFile,
   Capability,
@@ -17,22 +28,11 @@ import type {
   StartOutcome,
   State,
   VersionInfo,
-} from "@server/panel";
-import * as api from "@server/panel";
-import type { FieldId } from "@server/settings-fields";
-import { workerCommand, workerSpawnEnv } from "@server/tap";
-import { metricHistory, sampleFleet, type FleetRow } from "@server/telemetry";
-/**
- * 面板的会话状态：一份进程内单例，装着从磁盘与运行实例读来的数据，以及改动它们的动作。
- *
- * 取数分两档：
- *  - **快**（3 s，无重叠）：实例进程指标、日志增量、选中实例玩家；每 10 s 留一份统计采样。
- *  - **慢**（按需）：主机体检、本次运行健康、版本目录体积 —— 每次要跑 PowerShell 或扫盘。
- *
- * 所有写操作都走 `src/panel.ts`（面板唯一的业务入口），成功/失败都落成一条 `notice`，
- * 界面只负责把 notice 显示出来，不各自编话术。
- */
-import { createSignal } from "@solid-gpui/core/runtime";
+} from "#server/panel";
+import * as api from "#server/panel";
+import type { FieldId } from "#server/settings-fields";
+import { workerCommand, workerSpawnEnv } from "#server/tap";
+import { metricHistory, sampleFleet, type FleetRow } from "#server/telemetry";
 
 export type NoticeKind = "info" | "success" | "warning" | "error";
 export type Notice = { id: number; kind: NoticeKind; title: string; detail?: string; at: number };

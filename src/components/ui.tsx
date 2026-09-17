@@ -6,7 +6,11 @@
  *
  * 布局与文字的硬约束（渲染器的规矩，别改回去）：
  *  1. 控件里的文字必须包 `<Text>`：渲染器规定裸文本只能直接挂在 `Text` 之下。
- *  2. 每一层容器都要显式 `flexDirection`（默认是 `row`）；要撑满剩余高度用
+ *  2. 每一层容器都要显式写方向：宿主只在**一个 flex 样式都没给**时才用 GPUI 的默认（`row`）；
+ *     一旦给了 `gap` / `alignItems` / `justifyContent` / `flexWrap` 就按 flex 容器处理，其中
+ *     除 `flexWrap` 外还会落成 `column` —— 也就是说"只写 `gap` 的容器是列，不是行"。SDK 从
+ *     f3f8590 起公开了 `Row` / `Column`（`gap`/`align`/`justify`/`padding` 简写）作为显式写法；
+ *     本目录沿用显式 `flexDirection`，两种写法不要混着用。要撑满剩余高度用
  *     `height: 0 + flexGrow: 1 + minHeight: 0`，滚动内容保持 `flexShrink: 0`。
  *     详见下方 `PageScroll`。
  *  3. 未知 prop 直接抛 `Unknown native prop`。

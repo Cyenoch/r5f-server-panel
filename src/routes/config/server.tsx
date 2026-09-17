@@ -1,9 +1,9 @@
-import { MANUAL_OPTION, SETTINGS_FIELDS, type FieldDef } from "@server/settings-fields";
 /** Selected instance settings. Shared gameplay belongs to its mode template. */
 import { Icon, Pressable, Text, View, type SolidChild } from "@solid-gpui/core";
 import { Input, Select } from "@solid-gpui/core/components";
 import { createEffect, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
+import { MANUAL_OPTION, SETTINGS_FIELDS, type FieldDef } from "#server/settings-fields";
 import { InstanceEditor } from "../../components/instances";
 import { Action, Card, FormDialog, FormRow, Note, PageHeader, PageScroll } from "../../components/ui";
 import { Fold } from "../../components/ui";

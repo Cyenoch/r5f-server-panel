@@ -32,6 +32,9 @@
     // 路由生成产物（文件头明确要求排除）。
     "src/routeTree.gen.ts",
     "src/generated/**",
+    // solid-gpui 生成的工具链工程（tsconfig / 产物记录），与上面的产物同理：
+    // 由 `solid-gpui prepare` 重写，不该由格式化器定风格。
+    ".solid-gpui/**",
     "native/target/**",
   ],
 }

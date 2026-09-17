@@ -1,23 +1,81 @@
 # solid-gpui 适配与剩余问题
 
-更新时间：2026-09-17。当前子模块 pin 为 **`e5448f62cbdde66c67d9d073609a0fab185697c3`**（Windows Support），从 `fbd73f6` 升级。下方旧十条痛点记录的是此前 `66f17e0` → `fbd73f6` 的适配。
+更新时间：2026-09-17。当前子模块 pin 为 **`f3f8590bf150bad361d40eecde991a1fbc184b06`**（统一 Vite 工具链与公共打包 API），从 `e5448f62` 升级。
 
-证据按平台分别记录；**上游记录**指 SDK 自己的示例/测试，**源码分析**不等于运行验收。下方历史阶段的分发方案已由最新单文件方案取代。
+除下面新增的迁移小节外，**本文其余全部经验与验收记录都采集于更早的 pin（`fbd73f6` / `e5448f62`），只属于旧提交，不构成当前修订的验证**。证据按平台分别记录；**上游记录**指 SDK 自己的示例/测试，**源码分析**不等于运行验收。历史阶段的分发方案（旁置 Bun、旧 `bun run build`）已由本轮的公共打包链取代。
+
+## 2026-09-17：接入公共内嵌打包（pin `f3f8590b`，实现变更）
+
+本仓库从 `e5448f62`（Windows Support）升到 `f3f8590b`（统一 Vite 工具链与公共打包 API）。分发链不再自己实现打包器：
+
+- `scripts/build.ts` 只做应用自己那一半：产出两个入口（app 入口走 `bun --bun vite build`，它让 `solidGpui()` 写出 `.solid-gpui/artifacts.json`；worker 入口走同一份配置的 worker 模式，但用公开的 Vite `build()` API 拿**实际产出**的入口 chunk），然后调公共库 `packageEmbeddedApplication`（`@solid-gpui/vite/embedded`），传入 `application = { native/Cargo.toml, r5-server-gui, ["embedded"], native/src/packaged-main.rs }` 与 `workers = [<worker chunk 的实际路径>]`；应用入口取产物记录的 `bundle`，worker 入口取这次构建**实际产出**的 chunk `fileName` 配上它自己解析出的 outDir —— 两边都不猜产物文件名。
+- 删除 `scripts/embedded-bun.ts`、`scripts/embedded-crate.ts`：它们导入上游私有 `scripts/bun-embedded-bundle.ts`，并自行复核原生清单、解析模块图、按文件名猜 worker 图键、生成应用 crate。这些现在全在上游打包器内（原生图准备、序列化、生成并编译应用 crate、镜像机器类型与图摘要复核、原子发布）。
+- 入口身份不再猜：打包器把 `BUN_EMBEDDED_ENTRY` / `BUN_EMBEDDED_WORKERS` 写进生成的 crate，`native/src/packaged-main.rs` 原样交给 `run_packaged`；镜像里的 worker 不是恰好一个就报错退出，不回退、不挑第一个可用键。
+- 序列化器与（跨平台时的）编译基线成为**显式构建期输入**：`R5_BUILD_BUN` 必需，图目标平台与构建机不一致时 `R5_BUILD_BASE` 必需（默认 macOS → Windows 就属于这种）。上游不构建也不下载序列化器（`distribution.md`），所以旧脚本里“从固定 checkout 现场构建序列化器/编译基线”的能力随之取消；`R5_BUILD_NATIVE_MANIFEST`（只读复用原生清单）同样没有公共接缝，一并移除。新增 `R5_BUILD_DEPLOYMENT_TARGET`（与 `R5_BUILD_MACOS_SDK` 配套，本机 26.5）。
+- 发行命令从 `bun run build` 改为 `bun run package`；`bun run build` 现在只产出 JS bundle。`routes` / `gui` / `gui:dev` / `gui:build` / `host:build` / `host:build:release` / `host:run` 均已删除，模拟开发用 `R5F_DEV=1 bun run dev`，宿主与绑定由 `bun run generate` 准备，`bun run preview` 用已构建宿主跑已构建 bundle。
+
+### 当前修订的验证（pin `f3f8590b`，2026-09-17 主流程实跑）
+
+命令与结果，全部在本仓库根目录执行：
+
+- `bun run generate`（构建目标宿主并导出绑定）、`bun run check:generated`：通过。
+- `bun run doctor`：dist 模式全 PASS —— 唯一一份 `solid-js` 1.9.15、七条 Cargo patch、profile 与 runtime 契约一致。
+- `bun run typecheck`：通过（`tsc --noEmit` 在最终闸门里也是干净的一部分）。
+- `bun run test`（公开测试入口）：PASS，**13 passed / 0 failed，3 files / 102 assertions**，约 6.58s。
+- 评审：SpecReview PASS；StandardsReview 指出的 P2（测试 teardown 归属）已修并复审 PASS。
+- `bun run build`：PASS，139 个模块，产出当前宿主目标的 bundle。
+- `bun run package --target aarch64-apple-darwin --profile debug`：PASS，151.36s；产物 `dist/r5-server`，**363613176 B**，SHA-256 `75a8e5963e408d93a7e7367909a71ffef67bb47dfa256421189872a2c47803c5`；图载荷摘要 `e20db9a38bff4129ba14e43c0a09e98500d964645d63a5bfb74a3ed746e8d9bf`；打包器报告的入口身份 `/$bunfs/root/app.js` 与 worker `/$bunfs/root/worker.js`。环境为上文那套固定版本序列化器 + `R5_BUILD_NINJA` + `R5_BUILD_MACOS_SDK`(26.5) + `R5_BUILD_DEPLOYMENT_TARGET`(26.5)，并用 `R5_BUILD_SOURCE` 指向旧的项目缓存当源码种子。
+- `cargo test --manifest-path native/Cargo.toml --locked --features embedded --lib`：PASS，2 tests / 147.39s；用独立的 `SOLID_GPUI_BUN_CACHE=native/target/embedded-test-cache`，覆盖真实后端的高位 u32 完成码、重启与失败路径。
+- 完整闸门 PASS：`bun run fmt && bun run check` —— oxfmt 覆盖 90 个文件；`tsc --noEmit`、oxlint、`fmt:check` 全部干净（1.35s）。
+- 供给与安装：四个同修订 tarball 的 SHA-256 与 `provenance.json` 全部一致；清空 `node_modules` 后 `bun install --frozen-lockfile` 干净通过（118 packages，未触发任何 Rust 编译或安装期 lifecycle prepare）。
+
+开发链路的实跑证据（同一 pin、真实 GUI，不是只把进程起起来）：
+
+- 真实开发沙箱 `.tmp/sdk-migration-dev` 用 `R5F_DEV=1 bun run dev` 启动；窗口里启动模拟实例（worker pid 84207），玩家页显示 2 个真人 + 1 个机器人。
+- JS 改动：标题修改在 epoch 2 生效，窗口（22484）与宿主（70211）都不变。
+- 故意注入 TS 语法错误：router/Vite 报错但 watcher 存活；恢复成原文后 epoch 3，旧标题还原。
+- 故意在 `native/src/lib.rs` 注入 `compile_error!`：cargo 退出 101，watcher 打印 `Watching for changes`；恢复原文后 2.03s 重建，新宿主 28670 / 新窗口 22634 仍显示同一批玩家。
+- AX 交互：打开原生 AddBot 对话框再 Cancel，控件消失；用 AXCloseButton 关闭原生窗口后 GUI 退出，worker 84207 仍存活（关面板不等于停服）；dev watcher 在 GUI 关闭之后才被显式停掉。
+- 所有故意改动均已还原。仅“进程/窗口起来了”不作为功能证据：上面的结论都来自界面内容、日志与 AX 观察。
+
+打包、预览与失败保护的实跑证据：
+
+- `bun run preview`：读取此前记录的宿主与 bundle，**不重新构建**；重新打开后连上从开发 GUI 关闭后存活下来的 worker 84207，玩家与导航可用；Stop 对话框确认后 worker 消失（ESRCH）且持久化 `runtime=null`，界面显示 0 个运行实例；关闭原生窗口后 preview 以 0 退出。
+- 失败保护：把当前机上的 Bun 1.4.2（revision `744846f84`）当作 `R5_BUILD_BUN` 传入，`bun run package` 先正常产出 Vite 应用入口（139 模块）+ worker 入口（38 模块），然后在公共 SDK 的 `verifySerializerRevision` 处按预期拒绝（固定提交是 `34cbb9a40…`，退出码 1）；`dist/r5-server` 的 SHA-256 仍是 `75a8e596…03c5`，即**失败没有覆盖已发布产物**。更早的 `/bin/false` 只证明 preflight 会提前停住，不作为有效证据。
+- `otool -L dist/r5-server`：确认依赖 Homebrew LLVM 21 的 `libclang_rt.ubsan_osx_dynamic.dylib`（非系统库），所以 **macOS debug 产物不满足单机依赖闭包**，不能当可分发产物。
+- 改名/内嵌冒烟 PASS：只把 `dist/r5-server` 复制成 `.tmp/sdk-migration-standalone/单文件 面板`（含中文与空格），用绝对路径启动，cwd=`/tmp`、`PATH=/usr/bin:/bin`、`R5F_DEV=1` 与独立的包数据根，并故意带上脏的 `R5_SERVER_DAEMON` / `R5_SERVER_WORKER_ARGS`。同一个 EXE 里的真实 worker 91427 启动；关闭原生 GUI 以 0 退出后它仍存活（`ps` 显示 PPID 1）；重开的新 GUI（96392）识别出同一个 pid 91427。Restart 对话框 Cancel 保留 91427，Confirm 停掉 91427 并起新的 2549，重启后玩家页仍是 2 真人 + 1 机器人；最后 Stop 确认 2549 消失、持久化 `runtime=null`、界面 0 实例，关闭原生窗口以 0 退出。用改名后的 EXE 执行 `--worker migration-unknown-operation`（且带脏的继承参数）按预期报未知操作并以 1 退出，没有被继承的 setup 顶替。所有被测 GUI/worker 均已停止。本机没有对“界面里手敲命令的回执”断言：真实 status/kick 回执由公开自动化测试覆盖。
+
+pin 保持 `f3f8590b` 的理由（上游提示调查）：更新的 `1c2a4fa` 修的是目标 pin 之后（`f830c0b` 引入）的 DTO 扫描器问题；本应用没有自定义 DTO exporter，也不需要因此离开目标提交，更没有在应用侧复制任何 lexer。
+
+**边界**：以上是 macOS ARM64 debug 的运行验证（含真机 GUI 与改名/单文件冒烟，见上），而 debug 产物带非系统的 UBSan 动态库，不满足分发所需的依赖闭包；**Windows x64 仍未验收**（本机没有目标平台的固定版本 Bun 当编译基线）。上游的 `gpui` `fetch_update` 弃用告警与 `block 0.1.6` future-incompatibility 告警保持可见，未隐藏。本文下方旧章节的证据全部属于 `fbd73f6` / `e5448f62`。
+
+失败路径分两类，**已实测的范围不同**，也不能都当成「重活之前停住、不带调用栈」：
+
+**一、应用侧 preflight**（`BuildFailure`，在任何重活之前停住，只报契约、不打印调用栈）：
+
+- 由打包实现自身实跑过（脚本级命令，不属于主流程闸门）：`--profile bogus`；`--target x86_64-unknown-linux-gnu`（只有 `--prepare-only` 的平台）；PATH 里没有 ninja；未设 `R5_BUILD_BUN`；`R5_BUILD_BUN=./bun`（非绝对路径）；默认 Windows 目标下只给序列化器、不给 `R5_BUILD_BASE`；`R5_BUILD_BUN=/nonexistent/bun`（文件不存在）。
+- 主流程闸门另实跑：把不存在的 `/bin/false` 当 `R5_BUILD_BUN`（preflight 立刻停住，但这条只用来说明「会提前失败」，有效证据是下面那条提交不匹配）。
+- 实现分支，本轮**未实跑**：没有 `rustup`；固定工具链 / 目标标准库 / release 档 `rust-src` 未安装（本机已装齐）；`WINDOWS_SYSROOT`、`R5_BUILD_MACOS_SDK`、`R5_BUILD_SOURCE` 的路径类检查；以及 `--profile`/`--target` 之外的参数组合。
+
+**二、构建中途、产物检索与上游打包器**（发生在 Vite 产出之后，或原生图准备之后）：
+
+- 入口检索（脚本自己的 `BuildFailure`，只报契约、不带调用栈）：Vite 没把应用入口写进 `.solid-gpui/artifacts.json` 的 `bundle`；worker 模式没在 `build.ssr` 里声明入口、产出的入口 chunk 不是恰好一个、chunk 的 `facadeModuleId` 与声明的入口不一致、worker 构建的 outDir 与应用构建记录不一致；两个入口文件缺失。**这些是实现的 fail-closed 分支，本轮没有逐个实跑**（正常路径已通过）。
+- 上游打包器（错误来自 SDK，**可能带调用栈**）：SDK checkout 不完整、序列化器提交不匹配、目标平台缺编译基线、原生清单不合法、镜像机器类型或模块图摘要与序列化负载不一致。**主流程闸门实跑到的是序列化器提交不匹配**：Vite 应用入口（139 模块）与 worker 入口（38 模块）都已产出、原生图也已准备，SDK 才在 `verifySerializerRevision` 拒绝当前机的 Bun 1.4.2（`744846f84` vs 固定 `34cbb9a40…`）并以 1 退出；因为发布是原子的，`dist/r5-server` 保持不变。其余条目同样是实现上的 fail-closed 分支，本轮未逐个实跑。
 
 ## 根目录与严格单文件分发
 
-界面源码合并在根 `src/`，原生宿主在根 `native/`，路由生成与打包在根 `scripts/`。根目录统一管理 package、依赖锁、TypeScript、Vite 与 Rust 工具链；没有独立桌面工作区。
+界面源码合并在根 `src/`，原生宿主在根 `native/`，单文件打包在根 `scripts/`（`build.ts` + `build-support.ts`）。根目录统一管理 package、依赖锁、TypeScript、Vite 与 Rust 工具链；没有独立桌面工作区。
 
-- 删除公共 CLI、转发启动器与 stage 流程。`bun run dev` / `bun run gui` 启动真实后端开发面板，`bun run gui:dev` 显式开启模拟。默认不模拟。
-- `bun run build` 默认生成 Windows x64 release `dist/r5-server.exe`：GPUI、自有宿主、Bun/JSC、GUI 与 worker 模块图静态链接为一个文件；不分发相邻 Bun/JS，不解包应用代码，不回退到磁盘源码。
+- 删除公共 CLI、转发启动器与 stage 流程。`bun run dev` 启动真实后端开发面板，`R5F_DEV=1 bun run dev` 显式开启模拟。默认不模拟。
+- `bun run package` 默认生成 Windows x64 release `dist/r5-server.exe`：GPUI、自有宿主、Bun/JSC、GUI 与 worker 模块图静态链接为一个文件；不分发相邻 Bun/JS，不解包应用代码，不回退到磁盘源码。（旧 pin 下这条命令叫 `bun run build`。）
 - 开发继续使用外部 Bun/stdin；发行版使用内嵌传输。同一个 EXE 的内部 `--worker` 承担配置、计划任务、日志守护与模拟引擎，保留独立生命周期；不是公共命令行界面。
 - `src/paths.ts` 优先使用宿主声明的程序目录，源码回退到模块 URL；数据父目录独立配置。原生入口每次重建 worker 参数与命令前缀，避免旧环境误选操作。
-- worker 完成通过 `R5WX` 帧携带完整状态，原生宿主同时检查 VM 终止状态，避免把 Windows 取消码 1223 截成 8 位状态。
-- JS 中间文件位于 `native/target/bundles/`。Windows 原生缓存使用用户目录下的项目独立短路径，避免 Ninja/cmd 的长路径失败；最终镜像与图验证后才原子发布到 `dist/`。
-- 原生清单复用仍验证固定提交、补丁、overlay 字节、目标/档位及所有链接输入；没有修改 vendored SDK 或绕过来源检查。
+- worker 完成码通过公开的完成 API 传递完整 u32（`EmbeddedBunAdapter::result()`），宿主同时核对 VM 终止状态，避免把 Windows 取消码 1223、`0xC0000409` 这类值截成 8 位状态；`R5WX` 帧与 `__solidGpuiHost` 反射已删除。
+- JS 中间文件位于 `native/target/bundles/`。Windows 原生缓存使用用户目录下的项目独立短路径，避免 Ninja/cmd 的长路径失败；最终镜像与模块图复核通过后才原子发布到 `dist/`（原子替换由上游打包器完成）。
+- 不再有应用侧的原生清单复用（`R5_BUILD_NATIVE_MANIFEST` 已移除，公共 API 没有这个接缝）：清单校验、序列化与镜像复核都在上游打包器里，没有修改 vendored SDK 或绕过来源检查。
 - 首次构建先逐条执行 `git submodule update --init --recursive` 与 `bun install`；PowerShell 5.1 不使用粘贴的 `&&`。固定工具链与覆盖项见 README。
 
-已完成的应用侧验证：
+旧 pin 的应用侧验证（`e5448f62`，历史记录，**不是当前修订的验证**）：
 
 - Windows x64 release：在 ARM64 Windows 11 的 x64 兼容层完成根目录构建，产物已复制到本仓库 `dist/r5-server.exe`，大小 **109396992 B**；SHA-256 为 `41dd36704915c8e0125ea33d2a5cda716df814b8b78fc951e43d78862300ad5c`。镜像校验了 x64 机器类型及 `B:/~BUN/root/app.js`、`B:/~BUN/root/worker.js` 两个入口，图摘要为 `22d50d80ce9d8f877e6d51a0c454eef789f04ce27d1a39c708f124afe4f02bd9`。
 - Windows 单文件迁移：只复制 EXE 并改名为含中文的文件，目录同时含空格；从 Windows 系统目录启动，PATH 仅保留系统路径，没有旁置 Bun/JS。已观察真实后端总览及正常关闭；最终产物的模拟窗口实测启动实例、关闭 GUI 后原 worker PID 8124 继续存活、重开后识别同一实例、输入 `status` 得到“引擎确认执行”与 hostname 回执、确认停止后显示 0 个运行实例且 worker 消失。测试窗口和控制进程均已退出，未停止其他实例。
@@ -103,7 +161,7 @@
 
 **本机实测**，不是公共 `Action` 未传 label 那个应用问题：
 
-1. `bun run gui:dev`，玩家列表 → 加机器人 → 展开“机器人队伍”。
+1. `R5F_DEV=1 bun run dev`，玩家列表 → 加机器人 → 展开“机器人队伍”。
 2. Select 已显式传 `accessibilityLabel="机器人队伍"`；画面显示三个队伍选项。
 3. AX 树能读到触发器名称和值，弹出内容却只有三个无名 `group`：
 
@@ -140,7 +198,7 @@ list
 
 ### P2：Vite 原生配置加载兼容性告警
 
-**本仓库 `bun run gui:build` 实际输出**：上游 router 的 Vite 插件使用无扩展名相对导入，不兼容 Vite 计划采用的默认 `configLoader: 'native'`：
+**本仓库生产构建的实际输出**（旧 pin 下的命令是 `bun run gui:build`，现在是 `bun run build`）：上游 router 的 Vite 插件使用无扩展名相对导入，不兼容 Vite 计划采用的默认 `configLoader: 'native'`：
 
 - `packages/solid-gpui-router/src/vite.ts`：`./generation-session`、`./generator`；
 - `packages/solid-gpui-router/src/generation-session.ts`：`./generator-engine`。

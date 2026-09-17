@@ -1,3 +1,6 @@
+import { Text, View, type SolidChild } from "@solid-gpui/core";
+import { Input, Select, Switch, type Choice, type ChoiceGroup } from "@solid-gpui/core/components";
+import { createEffect, createMemo, createSignal } from "@solid-gpui/core/runtime";
 /**
  * 游戏模式模板：把「玩法 + 地图 + 对局参数」存成可复用的预设。
  *
@@ -10,19 +13,16 @@
  *     "Overrides a playlist var for every connected client"），活在实例进程里，重启后要重新应用；
  *  3. **编辑模板不会热重载正在跑的对局**：改完的模板要等下次启动或显式应用才用得上。
  *
- * 参数清单不在这里手写：玩法 → 字段全部来自 `@server/mode-templates`（那份表指着读取它的脚本行），
+ * 参数清单不在这里手写：玩法 → 字段全部来自 `#server/mode-templates`（那份表指着读取它的脚本行），
  * 所以不会出现"面板给了一个引擎不读的旋钮"。玩法/地图清单来自**参考版本**的目录
  * （`platform/playlists_r5_patch.txt`），参考版本只是为了照着填，不写进模板。
  */
-import type { Catalog } from "@server/catalog";
-import { loadCatalog } from "@server/catalog";
-import type { ModeTemplate, TemplateField } from "@server/mode-templates";
-import { templateFields, validateTemplate } from "@server/mode-templates";
-import * as api from "@server/panel";
-import { MANUAL_OPTION } from "@server/settings-fields";
-import { Text, View, type SolidChild } from "@solid-gpui/core";
-import { Input, Select, Switch, type Choice, type ChoiceGroup } from "@solid-gpui/core/components";
-import { createEffect, createMemo, createSignal } from "@solid-gpui/core/runtime";
+import type { Catalog } from "#server/catalog";
+import { loadCatalog } from "#server/catalog";
+import type { ModeTemplate, TemplateField } from "#server/mode-templates";
+import { templateFields, validateTemplate } from "#server/mode-templates";
+import * as api from "#server/panel";
+import { MANUAL_OPTION } from "#server/settings-fields";
 import {
   Action,
   Card,

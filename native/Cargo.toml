@@ -46,8 +46,9 @@ gpui-pre = { path = "../vendor/solid-gpui/vendor/gpui" }
 gpui-pre-web = { path = "../vendor/solid-gpui/vendor/gpui-web" }
 gpui-pre-wgpu = { path = "../vendor/solid-gpui/vendor/gpui-wgpu" }
 # 平台 crate 也必须替换：`gpui-pre-platform`（crates.io）按目标平台依赖
-# `gpui-pre-windows` / `gpui-pre-macos`，submodule 的 [patch.crates-io] 两个都换成了自己的
-# 副本。少一条不会报错，但会**静默地**用 crates.io 上那份**没有被 patch 过**的平台实现
+# `gpui-pre-windows` / `gpui-pre-macos` / `gpui-pre-linux`，submodule 的 [patch.crates-io] 三个都换成了
+# 自己的副本。少一条不会报错，但会**静默地**用 crates.io 上那份**没有被 patch 过**的平台实现
 # （macOS 上就是原生 anchored popup 没实现的老版本），与 pin 住的 submodule 不一致。
 gpui-pre-windows = { path = "../vendor/solid-gpui/vendor/gpui-windows" }
 gpui-pre-macos = { path = "../vendor/solid-gpui/vendor/gpui-macos" }
+gpui-pre-linux = { path = "../vendor/solid-gpui/vendor/gpui-linux" }

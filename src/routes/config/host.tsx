@@ -1,4 +1,3 @@
-import { type Capability, type CapabilityId, type HostFacts } from "@server/inspect";
 /**
  * 主机配置：本机为跑专用服务器要做的系统侧设置（防火墙 / 页面文件 / Defender / 自启 / 电源）。
  *
@@ -12,6 +11,7 @@ import { type Capability, type CapabilityId, type HostFacts } from "@server/insp
 import { Text, View, type SolidChild } from "@solid-gpui/core";
 import { createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute } from "@solid-gpui/router";
+import { type Capability, type CapabilityId, type HostFacts } from "#server/inspect";
 import {
   Action,
   Card,

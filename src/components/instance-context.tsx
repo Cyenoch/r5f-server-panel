@@ -1,8 +1,8 @@
-import * as api from "@server/panel";
 import { Text, View, type SolidChild } from "@solid-gpui/core";
 import { Select } from "@solid-gpui/core/components";
 import { createSignal } from "@solid-gpui/core/runtime";
 import { useLocation, useNavigate } from "@solid-gpui/router";
+import * as api from "#server/panel";
 import { session } from "../lib/session";
 import { fontSize, palette, space } from "../lib/theme";
 import { Action, Chip, Confirm, Note, Toolbar } from "./ui";

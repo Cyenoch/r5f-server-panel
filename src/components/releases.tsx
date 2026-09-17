@@ -1,14 +1,3 @@
-import type { VersionInfo } from "@server/panel";
-import {
-  type InstallProgress,
-  ReleaseError,
-  type ReleaseInfo,
-  checkRelease,
-  findInstalled,
-  installRelease,
-  isInstalling,
-  releaseDelta,
-} from "@server/releases";
 /**
  * 服务端版本页：官方发布的最新版本、本机已经装好的版本、下载与安装。
  *
@@ -21,7 +10,7 @@ import {
  *     把边界说明白，而不是给一个「已验证」的假徽章。
  *  2. **不做校验和。** 没有可对照的摘要就不假装校验过。安装时真正校验的是：来源域名、
  *     文件名形状、包内路径（绝对路径/`..`/符号链接一律拒绝）、解压后的三件套、
- *     目录名与文件名是否同一个版本 —— 全部由 `@server/releases` 执行。
+ *     目录名与文件名是否同一个版本 —— 全部由 `#server/releases` 执行。
  *  3. **装版本 ≠ 换版本。** 安装只往实例根目录里加一个版本目录，不写 state、不动正在
  *     跑的实例；哪个实例用哪个版本由实例自己决定 —— 这页没有全局版本选择器。
  *
@@ -33,6 +22,17 @@ import {
  */
 import { Icon, Text, View, type SolidChild } from "@solid-gpui/core";
 import { createSignal } from "@solid-gpui/core/runtime";
+import type { VersionInfo } from "#server/panel";
+import {
+  type InstallProgress,
+  ReleaseError,
+  type ReleaseInfo,
+  checkRelease,
+  findInstalled,
+  installRelease,
+  isInstalling,
+  releaseDelta,
+} from "#server/releases";
 import { formatBytes, formatRelative } from "../lib/format";
 import { session } from "../lib/session";
 import { font, fontSize, palette, radius, space } from "../lib/theme";

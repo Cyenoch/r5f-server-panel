@@ -1,4 +1,3 @@
-import { DEV_MODE } from "@server/panel";
 import { Icon, Text, View, type SolidChild } from "@solid-gpui/core";
 import {
   Dialog,
@@ -12,6 +11,7 @@ import {
 } from "@solid-gpui/core/components";
 import { createEffect, createMemo, createSignal, Show } from "@solid-gpui/core/runtime";
 import { Outlet, useLocation, useNavigate } from "@solid-gpui/router";
+import { DEV_MODE } from "#server/panel";
 import { formatRelative } from "../lib/format";
 import { setWindowTitle } from "../lib/host";
 import { NAV, navItemFor } from "../lib/nav";

@@ -1,9 +1,9 @@
-import * as api from "@server/panel";
-import { SETTINGS_FIELDS } from "@server/settings-fields";
 import { Text, View, type SolidChild } from "@solid-gpui/core";
 import { Input, Select } from "@solid-gpui/core/components";
 import { createSignal } from "@solid-gpui/core/runtime";
 import { useNavigate } from "@solid-gpui/router";
+import * as api from "#server/panel";
+import { SETTINGS_FIELDS } from "#server/settings-fields";
 import { session } from "../lib/session";
 import { fontSize, palette, space } from "../lib/theme";
 import {

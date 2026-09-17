@@ -1,4 +1,3 @@
-import type { Announcement, AnnouncementsFile } from "@server/announcements";
 /**
  * 公告：服务端轮播 / 进场文案（`platform/datatable/chat_announcements.csv`）。
  *
@@ -24,6 +23,7 @@ import {
 } from "@solid-gpui/core/components";
 import { createEffect, createSignal } from "@solid-gpui/core/runtime";
 import { createFileRoute, useNavigate } from "@solid-gpui/router";
+import type { Announcement, AnnouncementsFile } from "#server/announcements";
 import {
   Action,
   Card,

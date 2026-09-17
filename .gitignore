@@ -16,8 +16,12 @@ dist/
 
 # 原生宿主与构建中间产物
 /native/target/
+# 宿主导出的原生契约（`native.output`）
 /src/generated/
+# 路由插件生成的路由树
 /src/routeTree.gen.ts
+# `solid-gpui prepare` 生成的 TypeScript 工程（tsconfig.json 由它 extend）与产物记录
+/.solid-gpui/
 
 # ── 运行时状态（机器本地：pid / ctlToken / 明文密码 / 绝对路径）─────
 /r5-server.json

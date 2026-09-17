@@ -69,7 +69,7 @@
 
 需要独立生命周期或提权的任务，通过同一个 EXE 的内部 `--worker` 入口运行：主机配置、计划任务、日志守护、模拟引擎。它不是公共 CLI。游戏服务端与日志守护是分离进程，**关闭面板不等于停服**；重开面板可继续管理。
 
-开发仍使用 Vite + 外部 Bun/stdin 传输：根目录运行 `bun run dev`，模拟后端运行 `bun run gui:dev`。默认真实后端，只有 `R5F_DEV=1` 开启模拟。程序目录由宿主声明，独立于 `R5_SERVER_ROOT` 数据父目录；模拟数据位于该父目录下的 `.dev/r5f/`。
+开发仍使用 Vite + 外部 Bun/stdin 传输：根目录运行 `bun run dev`。默认真实后端，只有 `R5F_DEV=1` 开启模拟。程序目录由宿主声明，独立于 `R5_SERVER_ROOT` 数据父目录；模拟数据位于该父目录下的 `.dev/r5f/`。
 
 ## 默认玩法：1v1
 
@@ -245,7 +245,7 @@ src/                 GUI、内部 worker 与共享业务逻辑
   components/        UI 组件
   lib/               界面会话与主题
 native/              Rust 原生宿主与 Cargo.lock
-scripts/             路由生成与单文件构建流水线
+scripts/             单文件发行版打包（Vite 之后交给上游公共打包器）
 vendor/solid-gpui/    固定提交的上游子模块
 vite.config.ts       根目录 Vite 接入
 rust-toolchain.toml  根目录 Rust 工具链
@@ -254,9 +254,11 @@ rust-toolchain.toml  根目录 Rust 工具链
 ```powershell
 git submodule update --init --recursive
 bun install
+bun run generate               # 构建原生宿主并导出绑定（首次、或绑定变更后）
 bun run dev                    # 源码方式运行面板（改代码即时生效）
-bun run gui:dev                # 模拟后端 GUI
-bun run build                  # 完成构建环境准备后，生成 dist/r5-server.exe
+$env:R5F_DEV = "1"; bun run dev # 模拟后端 GUI
+bun run build                  # 只产出 JS bundle（native/target/bundles）
+bun run package                # 生成单文件发行版 dist/r5-server.exe（见下节）
 bun update --latest            # 依赖升到最新（受下面那条 24 小时冷却期约束）
 ```
 
@@ -274,7 +276,7 @@ TCP 控制通道和日志读取仍走正常代码。窗口标题和所有页面�
 git submodule update --init --recursive
 bun install
 xcodebuild -downloadComponent MetalToolchain  # 未安装时执行，GPUI 编译着色器需要它
-bun run gui:dev                              # 原生窗口 + Vite 热重载 + 模拟后端
+R5F_DEV=1 bun run dev                        # 原生窗口 + Vite 热重载 + 模拟后端
 ```
 
 在窗口里点「启动服务器」，即可看到两个模拟真人与一个机器人、实时日志和模拟运行指标。
@@ -285,7 +287,7 @@ bun run gui:dev                              # 原生窗口 + Vite 热重载 + �
 状态、档案、公告、主机配置、名单、备份和日志跨进程保留；夹具只补缺失文件，不覆盖编辑。
 重启模拟引擎会重新生成初始玩家。关闭面板不会停止模拟引擎；重开面板后用停止按钮结束实例。
 要恢复全新数据，先关闭开发窗口并停止实例，再删除 `.dev/r5f/`，下次运行会重建。
-原有 `bun run gui` / `bun run dev` 不自动开启模拟，Windows 的真实服务端流程不变。
+原有 `bun run dev` 不自动开启模拟，Windows 的真实服务端流程不变。
 
 **场景控制：**以下指令在面板控制台输入：
 
@@ -311,13 +313,14 @@ Windows 防火墙、页面文件、Defender、电源与自启只读写模拟状�
 
 ### 单文件发行版构建
 
-`bun run build` 默认构建 **Windows x64 / release**，输出 **`dist/r5-server.exe`**。脚本依次生成路由与原生绑定、打包 GUI 和 worker、准备固定版本 Bun、序列化模块图、链接原生宿主，最后验证机器类型和模块图摘要，再原子发布 EXE。失败不会覆盖此前成功发布的文件。
+`bun run package` 默认构建 **Windows x64 / release**，输出 **`dist/r5-server.exe`**。它只做两件事：先产出两个入口（app 入口走 `bun --bun vite build`；worker 入口用同一份 `vite.config.ts` 的 worker 模式经公开的 Vite `build()` API 构建，取**实际产出**的入口 chunk 与其解析出的输出目录，不猜产物文件名），再把「已构建的两个入口 + 应用 Cargo 工程（`native/Cargo.toml`、`features = ["embedded"]`、入口 `native/src/packaged-main.rs`）」交给上游公共打包器 `@solid-gpui/vite/embedded`。原生图准备、模块图序列化、生成并编译应用 crate、复核镜像机器类型与图摘要都在打包器内部完成；`dist/` 只在最后一步原子替换，失败不会覆盖此前成功发布的文件。两个入口键由打包器写进生成的 crate（`BUN_EMBEDDED_ENTRY` / `BUN_EMBEDDED_WORKERS`），宿主不再按文件名猜路径，也不再复制上游的原生清单校验、图解析或 crate 生成。
 
 构建环境需要提前准备；这些工具只用于构建，**不随 EXE 分发**：
 
 - Bun；Windows 使用 **x64 Bun**，包括在 ARM64 Windows 上构建。当前 Solid 编译器的 ARM64 WASI 路径不能在 Bun 正常初始化。
 - Git 与完整递归子模块；根目录 `rust-toolchain.toml` 指定的开发工具链。
 - 内嵌 Bun 固定工具链：`nightly-2026-07-20`（含 `rust-src`）、LLVM/Clang/LLD **21**、Ninja **1.13.0**、CMake、Python 3、Perl。固定提交及版本以 `vendor/solid-gpui/crates/solid-gpui-bun-sys/bun-build.json` 为准。
+- **由该固定提交构建的 Bun 序列化器**（必需）：序列化载荷不带格式版本，打包器读 `bun --revision` 并拒绝任何其他提交；上游不会替你构建或下载它（`vendor/solid-gpui/docs/distribution.md`）。可以复用上游嵌入构建缓存里的那个（`SOLID_GPUI_BUN_CACHE` 目录下的 `bun-build/bun-debug`，由 `solid-gpui-bun-sys` 的嵌入构建产出），也可以自行从固定提交构建；两条路都用绝对路径经 `R5_BUILD_BUN` 传入。图目标平台与构建机不一致时（默认的 macOS → Windows 就是这样）还要用 `R5_BUILD_BASE` 给出**目标平台、同一提交**的 Bun，否则打包器会拒绝下载不受提交约束的基础可执行文件。
 - Windows：Visual Studio C++ Build Tools、Windows SDK、PowerShell **7**（`pwsh` 在 PATH）。调用构建命令的终端仍可使用 PowerShell **5.1**；脚本只导入当前进程的 VS 开发环境，不修改全局配置。
 - Windows release 着色器需要 SDK 的 `fxc.exe`，可通过 `GPUI_FXC_PATH` 指定。匹配 Bun 预编译依赖的 SDK/CRT 可用 `WINDOWS_SYSROOT` 指定；本机使用 SDK 10.0.26100 与 MSVC 14.44。
 
@@ -330,31 +333,35 @@ git submodule update --init --recursive
 bun install
 rustup toolchain install nightly-2026-07-20 --component rust-src
 rustup target add x86_64-pc-windows-msvc --toolchain nightly-2026-07-20
-bun run build
+$env:R5_BUILD_BUN = "D:\tools\bun-pinned\bun.exe"   # 由固定提交构建的序列化器
+bun run package
 .\dist\r5-server.exe
 ```
 
 缓存与调试选项：
 
-| 选项                       | 用途                                                                                                             |
-| -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `--target <Rust triple>`   | 覆盖默认 Windows x64；支持 Windows/macOS 的 x64、ARM64                                                           |
-| `--profile debug`          | 调试打包；默认 release                                                                                           |
-| `R5_BUILD_BUN`             | 已有的同一固定提交 Bun 序列化器，必须是绝对路径                                                                  |
-| `R5_BUILD_BASE`            | 目标平台、同一提交的 Bun 编译基线，跨平台时需要                                                                  |
-| `R5_BUILD_SOURCE`          | 本地 Bun checkout 种子，避免重新下载源码                                                                         |
-| `R5_BUILD_CACHE`           | 覆盖构建缓存；Windows 默认 `%USERPROFILE%\.cache\r5b\<项目摘要>` 短路径，其他平台默认 `native/target/bun-static` |
-| `R5_BUILD_NATIVE_MANIFEST` | 只读复用已准备的原生清单；验证版本、补丁、目标、档位和全部链接输入                                               |
-| `R5_BUILD_NINJA`           | 指定固定版本 Ninja 的位置                                                                                        |
-| `R5_BUILD_MACOS_SDK`       | 指定兼容 LLVM 21 的 macOS SDK；本机使用 26.5，27 的头文件不兼容                                                  |
+| 选项                         | 用途                                                                                                             |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `--target <Rust triple>`     | 覆盖默认 Windows x64；支持上游目标矩阵里的 Windows/macOS x64、ARM64                                              |
+| `--profile debug`            | 调试打包；默认 release                                                                                           |
+| `R5_BUILD_BUN`               | **必需**：由固定提交构建的 Bun 序列化器（绝对路径）                                                              |
+| `R5_BUILD_BASE`              | 目标平台、同一提交的 Bun 编译基线；图目标平台与构建机不一致时必需（默认的 macOS → Windows 就是这种情况）         |
+| `R5_BUILD_SOURCE`            | 本地 Bun checkout 种子，避免重新下载源码                                                                         |
+| `R5_BUILD_CACHE`             | 覆盖构建缓存；Windows 默认 `%USERPROFILE%\.cache\r5b\<项目摘要>` 短路径，其他平台默认 `native/target/bun-static` |
+| `R5_BUILD_NINJA`             | 指定固定版本 Ninja 的位置                                                                                        |
+| `WINDOWS_SYSROOT`            | 交叉编译 Windows 用的 MSVC SDK/CRT 根（上游按 SDK 10.0.26100 / CRT 14.44 验证）                                  |
+| `R5_BUILD_MACOS_SDK`         | 指定兼容 LLVM 21 的 macOS SDK；本机使用 26.5，27 的头文件不兼容                                                  |
+| `R5_BUILD_DEPLOYMENT_TARGET` | macOS 部署目标；与上面的 SDK 配套指定                                                                            |
 
-例如 macOS 本地单文件验证用 `bun run build --target aarch64-apple-darwin --profile debug`，输出 `dist/r5-server`。这不是 Windows 运行验收。
+例如 macOS 本地单文件验证用 `bun run package --target aarch64-apple-darwin --profile debug`，输出 `dist/r5-server`。当前 pin 下这条命令已实跑通过（151.36s，产物 363613176 B，SHA-256 `75a8e596…03c5`，入口 `/$bunfs/root/app.js` + worker `/$bunfs/root/worker.js`）。两个边界都必须读完：`otool -L` 显示这个 **debug 产物依赖 Homebrew LLVM 21 的 `libclang_rt.ubsan_osx_dynamic.dylib`（非系统库），不满足依赖闭包，不能当可分发产物**；而 **Windows x64 目标仍未验收** —— 它要在有目标平台固定版本 Bun 当编译基线的机器上构建和验收。
 
-日常开发仍用 `bun run dev` / `bun run gui:dev`，不需要完整静态打包。`src/generated/native.ts`、`src/routeTree.gen.ts` 自动生成；中间 JS 在 `native/target/bundles`，不进入发布目录。根目录也可单独运行 `bun run host:build`、`bun run routes`。
+上游仍把这套静态打包标为实验性，且 CI 不验证静态应用包与各目标资格；目标状态表见 `vendor/solid-gpui/docs/distribution.md`。
+
+日常开发用 `bun run dev`（`R5F_DEV=1` 开模拟）；宿主与绑定由 `bun run generate` 单独准备，`bun run preview` 用已构建宿主运行已构建 bundle。`src/generated/native.ts`、`src/routeTree.gen.ts` 自动生成；中间 JS 在 `native/target/bundles`，不进入发布目录。
 
 PowerShell 5.1 提示符中的命令逐条执行，不粘贴 `&&`；package scripts 内的 `&&` 由 Bun shell 执行。若缺少 `gpui-kit/crates/component/Cargo.toml`，先补齐递归子模块，而不是反复安装 Bun 或运行 Cargo。
 
-当前 solid-gpui pin 为 `e5448f6`（Windows Support）。静态内嵌使用上游实验性打包链，具体产物和运行验收范围见 [docs/solid-gpui-notes.md](docs/solid-gpui-notes.md)。
+当前 solid-gpui pin 为 `f3f8590b`（统一 Vite 工具链与公共打包 API）。静态内嵌由上一节的 `bun run package` 通过上游公共打包器完成（实验性，资格见上游分发文档）；**旧 pin `e5448f62` 的单文件构建与验收记录只属于旧提交**，迁移后的实际产物与验收范围见 [docs/solid-gpui-notes.md](docs/solid-gpui-notes.md)。
 
 平台与产品取舍：
 
@@ -368,7 +375,7 @@ PowerShell 5.1 提示符中的命令逐条执行，不粘贴 `&&`；package scri
 提交前跑完整闸门（oxlint 规则 + 类型诊断 + oxfmt 格式，`denyWarnings` 打开，有 warning 也算不过）：
 
 ```powershell
-bun run check                  # 完整闸门：typecheck + fmt:check
+bun run check                  # 完整闸门：typecheck + lint + fmt:check
 bun run lint:fix               # 应用可自动修复的规则
 bun run fmt                    # 写回格式
 ```

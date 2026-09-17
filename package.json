@@ -4,49 +4,44 @@
   "private": true,
   "description": "R5Flowstate dedicated server native management panel",
   "type": "module",
+  "imports": {
+    "#server/*": "./src/*.ts"
+  },
   "scripts": {
-    "build": "bun run scripts/build.ts",
+    "generate": "solid-gpui prepare",
+    "check:generated": "solid-gpui prepare --check",
+    "doctor": "solid-gpui doctor",
+    "typecheck": "tsc --noEmit",
     "dev": "bun --bun vite",
+    "test": "solid-gpui test",
+    "build": "bun --bun vite build",
+    "preview": "solid-gpui preview",
+    "package": "bun run scripts/build.ts",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "typecheck": "oxlint --type-check",
     "fmt": "oxfmt --disable-nested-config",
     "fmt:check": "oxfmt --disable-nested-config --check",
-    "check": "bun run typecheck && bun run fmt:check",
-    "gui": "bun --bun vite",
-    "gui:dev": "R5F_DEV=1 bun --bun vite",
-    "gui:build": "bun --bun vite build",
-    "host:build": "cargo build --manifest-path native/Cargo.toml --locked",
-    "host:build:release": "cargo build --release --manifest-path native/Cargo.toml --locked",
-    "host:run": "cargo run --manifest-path native/Cargo.toml --locked",
-    "routes": "bun run scripts/generate-routes.ts"
+    "check": "bun run typecheck && bun run lint && bun run fmt:check"
   },
   "dependencies": {
-    "@jridgewell/remapping": "2.3.5",
-    "@jridgewell/trace-mapping": "0.3.31",
-    "@solidjs/compiler": "2.0.0-rc.6",
-    "@tanstack/history": "1.162.1",
-    "@tanstack/router-core": "1.171.28",
-    "@tanstack/router-generator": "1.167.34",
-    "@tanstack/router-utils": "1.162.2",
-    "bebop": "3.2.3",
-    "core-js-pure": "3.50.0",
+    "@solid-gpui/core": "file:vendor/sdk-tarballs/solid-gpui-core.tgz",
+    "@solid-gpui/router": "file:vendor/sdk-tarballs/solid-gpui-router.tgz",
     "csv-parse": "^7.0.2",
     "csv-stringify": "^6.8.3",
     "dotenv": "^17.4.2",
-    "event-target-shim": "6.0.2",
     "keyvalues-tools": "^1.1.0",
-    "oxc-transform": "0.148.0",
     "shell-quote": "^1.10.0",
     "solid-js": "1.9.15",
-    "string-width": "^8.2.2",
-    "vite": "8.2.2"
+    "string-width": "^8.2.2"
   },
   "devDependencies": {
+    "@solid-gpui/vite": "file:vendor/sdk-tarballs/solid-gpui-vite.tgz",
     "@types/bun": "^1.4.2",
     "@types/shell-quote": "^1.7.5",
     "oxfmt": "^0.67.0",
     "oxlint": "^1.82.0",
-    "oxlint-tsgolint": "^7.0.2001"
+    "oxlint-tsgolint": "^7.0.2001",
+    "typescript": "^7.0.2",
+    "vite": "8.2.2"
   }
 }

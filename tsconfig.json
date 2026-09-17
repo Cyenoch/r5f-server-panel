@@ -1,29 +1,23 @@
 {
+  // 应用只声明属于自己的那几项：严格度、JSX 形式、环境类型与要检查的目录。
+  //
+  // 其余（target / module / moduleResolution / jsxImportSource / paths / lib）全部来自
+  // `.solid-gpui/tsconfig.json` —— 那是 `solid-gpui prepare` 按**本次选中的宿主**写出来的：
+  // `#native` 与 `@solid-gpui/core/components` 指向宿主导出的绑定文件。
+  // 应用自己的 `#server/*` 不在 paths 里：那是 package.json `imports` 的包内自引用，
+  // TypeScript / Vite / Bun 三边同一个来源（见 vite.config.ts）。
+  // 这里**不许**再手写 `paths` / `baseUrl` / `customConditions`：TypeScript 不合并
+  // `compilerOptions.paths`，应用这边写一条就会把生成的那两条一起顶掉。
+  "extends": "./.solid-gpui/tsconfig.json",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
+    "strict": true,
     "jsx": "preserve",
     "jsxImportSource": "@solid-gpui/core",
-    "strict": true,
-    "noEmit": true,
-    "skipLibCheck": true,
-    "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
-    "types": ["bun", "vite/client"],
-    "paths": {
-      "@solid-gpui/core": ["./vendor/solid-gpui/packages/solid-gpui/src/index.ts"],
-      "@solid-gpui/core/runtime": ["./vendor/solid-gpui/packages/solid-gpui/src/runtime.ts"],
-      "@solid-gpui/core/stdio": ["./vendor/solid-gpui/packages/solid-gpui/src/stdio.ts"],
-      "@solid-gpui/core/embedded": ["./vendor/solid-gpui/packages/solid-gpui/src/embedded.ts"],
-      "@solid-gpui/core/native": ["./vendor/solid-gpui/packages/solid-gpui/src/native.ts"],
-      "@solid-gpui/core/motion": ["./vendor/solid-gpui/packages/solid-gpui/src/motion.ts"],
-      "@solid-gpui/core/components": ["./src/generated/native.ts"],
-      "@solid-gpui/core/jsx-runtime": ["./vendor/solid-gpui/packages/solid-gpui/src/jsx-runtime.ts"],
-      "#native": ["./src/generated/native.ts"],
-      "@solid-gpui/router": ["./vendor/solid-gpui/packages/solid-gpui-router/src/index.ts"],
-      "@server/*": ["./src/*"]
-    }
+    "skipLibCheck": true,
+    // `bun`：Bun/Bun.* 全局（bun:sqlite、bun:ffi、Bun.spawn…）；
+    // `vite/client`：`import.meta.hot`（app.tsx 用它做状态交接）与 `?inline` 资源声明。
+    "types": ["bun", "vite/client"]
   },
   "include": ["src", "scripts", "vite.config.ts"]
 }

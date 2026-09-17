@@ -1,0 +1,52 @@
+{
+  "note": "本目录不是 SDK 的发布源：@solid-gpui/* 还没有公共 registry，应用从这里安装 tarball。四个 tarball 必须来自同一个 SDK 提交 —— 混用不同提交的包等于让运行时、Vite 插件与生成的原生绑定各说各话。",
+  "source": {
+    "repository": "https://github.com/Cyenoch/solid-gpui.git",
+    "path": "vendor/solid-gpui",
+    "revision": "f3f8590bf150bad361d40eecde991a1fbc184b06",
+    "shortRevision": "f3f8590"
+  },
+  "packed": {
+    "bun": "1.4.2",
+    "commands": ["bun install --frozen-lockfile", "bun run task sdk-pack ../sdk-tarballs"],
+    "cwd": "vendor/solid-gpui",
+    "packer": "scripts/tasks.ts sdkPack（bun pm pack，不编译原生宿主）"
+  },
+  "artifacts": [
+    {
+      "package": "@solid-gpui/core",
+      "version": "0.3.0",
+      "file": "solid-gpui-core.tgz",
+      "sha256": "dac70d02c61d87ab19fbbdf8acb8f556c6a820c4c1d86c2221be3825ae1727d7",
+      "installed": true
+    },
+    {
+      "package": "@solid-gpui/vite",
+      "version": "0.3.0",
+      "file": "solid-gpui-vite.tgz",
+      "sha256": "6ea4587b0b212902c582895b74b5c5bee0b177f89e52dee77b0d49f9f114392d",
+      "installed": true
+    },
+    {
+      "package": "@solid-gpui/router",
+      "version": "0.3.0",
+      "file": "solid-gpui-router.tgz",
+      "sha256": "27f39b3b6ba31b9d6e48d48ed1e5386dd14f0acf1339da310d31c04981c905f6",
+      "installed": true
+    },
+    {
+      "package": "@solid-gpui/shiki",
+      "version": "0.2.0",
+      "file": "solid-gpui-shiki.tgz",
+      "sha256": "587a6894b4153745513009ccfbd74c06ff4505dc59161b42bf230569924de838",
+      "installed": false,
+      "reason": "同一次 sdk-pack 的产物（同提交、同版本线），但本应用不使用 @solid-gpui/shiki。"
+    }
+  ],
+  "installed": {
+    "dependencies": ["@solid-gpui/core", "@solid-gpui/router"],
+    "devDependencies": ["@solid-gpui/vite"],
+    "lockedBy": "bun.lock 记录 file: 路径与各 tarball 的完整性哈希，因此干净克隆跑 bun install --frozen-lockfile 即可复现；这四个文件必须随仓库入库。"
+  },
+  "refresh": "子模块前进后：bun install --frozen-lockfile && bun run task sdk-pack ../sdk-tarballs（在 vendor/solid-gpui 内），然后在根目录 bun install 更新 lock、bun run generate 重建绑定，并同步本文件的 revision / sha256。"
+}

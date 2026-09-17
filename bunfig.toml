@@ -6,9 +6,16 @@
 #
 # 除这条冷却期外，依赖一律取最新：升级跑 `bun update --latest`（会连同
 # package.json 的 range 一起改到冷却期内最新的版本）。
+#
+# 这里不再写 `linker`：早先那条 hoisted 覆盖只为一件事 —— 让 vendor/solid-gpui 的
+# **源码**通过祖先目录解析裸包名。现在应用与 Vite 配置一律走包 exports（SDK 走
+# vendor/sdk-tarballs 里的 tarball，见该目录 provenance.json），覆盖失去依据。
 [install]
 minimumReleaseAge = 86400
 
-# 第三方源码通过祖先目录解析裸包名（vite、solid-js、@tanstack/*）。
-# 依赖统一安装在根 node_modules，供应用与 vendor/solid-gpui 共享。
-linker = "hoisted"
+# 测试只跑应用自己的那份：`solid-gpui test` 转发裸 `bun test`，而仓库根下面还挂着
+# vendor/solid-gpui —— 那是 SDK 自己的测试套件（几十个文件、各要自己的依赖与预算）。
+# 不设 root 时它会一起被收集，默认 `bun run test` 就变成"顺便测一遍整个 SDK"。
+# 过滤器是同 `root` 相对的，所以单文件是 `bun run test state.test.ts`。
+[test]
+root = "src"

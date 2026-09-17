@@ -1,8 +1,8 @@
-import { DEV_MODE } from "@server/panel";
-import { playerCounts, type MetricSample } from "@server/telemetry";
 import { Text, View, type SolidChild } from "@solid-gpui/core";
 import { LineChart } from "@solid-gpui/core/components";
 import { createMemo, createSignal } from "@solid-gpui/core/runtime";
+import { DEV_MODE } from "#server/panel";
+import { playerCounts, type MetricSample } from "#server/telemetry";
 import { session } from "../lib/session";
 import { fontSize, palette, space } from "../lib/theme";
 import { Action, Card, EmptyHint, Note, Stat, Toolbar } from "./ui";
