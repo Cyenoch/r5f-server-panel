@@ -1,8 +1,25 @@
 # solid-gpui 适配与剩余问题
 
-更新时间：2026-09-16。子模块从 `66f17e0` 更新到 **`fbd73f66d54d0725d1c901a7cfc358d1a367d676`**。
+更新时间：2026-09-17。当前子模块 pin 为 **`e5448f62cbdde66c67d9d073609a0fab185697c3`**（Windows Support），从 `fbd73f6` 升级。下方旧十条痛点记录的是此前 `66f17e0` → `fbd73f6` 的适配。
 
 证据分开记录：**本机实测**指本面板在 macOS 的运行；**上游记录**指 SDK 自己的示例/测试；**源码分析**不等于测出了性能或验证过 Windows。
+
+## 2026-09-17：Windows Support 更新适配
+
+- **接入方式不变**：本次未修改 TS 组件、router/Vite 插件 API、宿主 profile 入口或工具链版本。保留外部 Bun + `ProcessAdapter` / `StdioTransport`、自有 Cargo 宿主及 `native:` 绑定导出；重新构建宿主并生成绑定，Bun 与 Cargo 锁文件无需调整。
+- **Windows 修复随子模块引入（源码分析）**：debug 渲染器将 HLSL 及 include 嵌入 EXE，从内存编译，不再读取构建机源码目录；Windows 资源 manifest 通过绝对路径宏传给资源编译器。已有 `gpui-pre` / `gpui-pre-windows` path patch 覆盖这两处，无需应用侧补丁。旧 EXE 必须重建，单换 JS 无法得到修复。[上游 Windows 排障说明](https://github.com/Cyenoch/solid-gpui/blob/e5448f62cbdde66c67d9d073609a0fab185697c3/docs/troubleshooting.zh-CN.md#windows-debug-启动时无法创建-directwritetextsystem)
+- **Release 构建要求**：仍需 Windows SDK 的 `fxc.exe`，可用 `GPUI_FXC_PATH` 指定；debug 的内存着色器编译不等于 release 着色器构建已验收。
+- **不迁移实验性内嵌 Bun**：上游新增静态打包器，但文档仍标为实验性，CI 未验证静态应用包。本面板继续使用旁置 Bun/JS 与独立日志守护，不在依赖适配中更换进程生命周期及分发契约。[上游分发边界](https://github.com/Cyenoch/solid-gpui/blob/e5448f62cbdde66c67d9d073609a0fab185697c3/docs/distribution.zh-CN.md#内嵌-bun-静态应用)
+
+本轮验证：
+
+- `bun install --frozen-lockfile`：通过，无依赖变更。
+- `bun run check`：类型、规则与格式检查全部通过。
+- `bun run gui:build`：通过；重编原生宿主、重新导出绑定并构建 164 个模块。Vite native-loader 告警仍存在，未隐藏。
+- `cargo build --manifest-path desktop/native/Cargo.toml --locked`：通过；`block v0.1.6` future-incompatibility 告警仍存在。
+- SDK 定向回归：`native`、`control-flow`、`stdio-host-lifetime`、`application`、新增的 `scripts/solid-jsx.test.ts`，**20 passed / 0 failed，138 assertions**。使用 `--conditions=browser --preload ./vendor/solid-gpui/scripts/solid-jsx.ts`。
+- macOS 原生窗口：使用新构建的 debug 宿主和 production bundle，在独立模拟目录中冷启动；已观察总览首帧、模拟实例启动、玩家三行六列表格、机器人对话框、Select 通过 Down + Enter 从队伍 0 更新为队伍 1，以及设置页滚动后的内容位移。没有帧时间测量，不把内容位移当作性能基准。
+- Select 弹出选项仍为三个无名 AX `group`，旧 P1 未修复。Windows x64/MSVC、release 着色器、内嵌 Bun 与本轮开发期热重载未做运行验收；此前热重载结果仅作为历史记录。
 
 ## 旧十条痛点的处理
 
@@ -104,7 +121,7 @@ list
 
 对上游的诉求是补目标平台 CI/可重复运行证据；本面板自身的发布验收仍由我们负责。另有 `block v0.1.6` 的 Rust future-incompatibility 告警，目前不阻断构建。
 
-## 本轮验证记录与边界
+## 2026-09-16 验证记录与边界（历史 pin `fbd73f6`）
 
 - `cargo build --manifest-path desktop/native/Cargo.toml --locked`：通过。
 - `bun run check`：类型、规则、格式全部通过。

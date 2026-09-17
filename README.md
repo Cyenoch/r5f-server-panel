@@ -430,8 +430,10 @@ bun run gui
 
 需要 Rust 工具链（`desktop/rust-toolchain.toml` 指定版本，覆盖 Vite 与 native 两种构建入口，cargo 会自动拉）。`desktop/src/generated/native.ts` 与 `desktop/src/routeTree.gen.ts` 都是构建产物，不入库，`gui`/`gui:stage` 会自动生成。
 
-当前 solid-gpui 子模块 pin 为 `fbd73f6`。历史痛点的修复状态、已删除的临时绕法、仍需上游处理的问题与验证范围见
+当前 solid-gpui 子模块 pin 为 `e5448f6`（Windows Support）。历史痛点的修复状态、已删除的临时绕法、仍需上游处理的问题与验证范围见
 [docs/solid-gpui-notes.md](docs/solid-gpui-notes.md)。
+
+本轮保持外部 Bun + stdio，不切换上游实验性的内嵌 Bun 静态打包。Windows debug 宿主现已内嵌着色器源码及 include，不再依赖构建机源码路径；需要重新编译 EXE，单换 JS 不生效。Windows release 构建仍需 Windows SDK 的 `fxc.exe`（可用 `GPUI_FXC_PATH` 指定），本面板的 Windows x64/MSVC 发布验收仍待目标机验证。
 
 平台与产品取舍：
 
