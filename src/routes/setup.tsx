@@ -56,6 +56,16 @@ function Checklist(): SolidChild {
               }
             />
             <Toolbar>
+              {store.settings().visibility === 0 ? null : (
+                <Action
+                  label={store.settings().hostip.length > 0 ? "重新获取公网 IP" : "获取公网 IP"}
+                  icon="lucide:globe"
+                  variant="solid"
+                  disabled={store.busy() !== null}
+                  tooltip={`问回显服务要本机公网 IPv4，写成 IP:${store.settings().port} 存进「公网地址」`}
+                  onPress={() => void store.detectHostip()}
+                />
+              )}
               <Action label="实例设置" onPress={() => void navigate({ to: "/config/server" })} />
               <Action label="主机环境" onPress={() => void navigate({ to: "/config/host" })} />
               <Action label="运行与健康" onPress={() => void navigate({ to: "/ops/health" })} />

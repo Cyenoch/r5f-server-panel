@@ -216,6 +216,18 @@ function launchTarget(state: State, instance: ServerInstance, version: VersionIn
   };
 }
 
+/**
+ * `+hostip` 的取值：面板统一写成 `ip:端口`。
+ *
+ * 实测只写 IP 时引擎对外公布的端口不对（用户实测要求 ip:port），所以值里没带端口就补上
+ * 本实例的游戏端口。留空 = 不传这一项，引擎用自测值（NAT 主机上那样会得到 `[::1]:0`）。
+ */
+export function hostipArgument(settings: Settings): string {
+  const value = settings.hostip.trim();
+  if (value.length === 0) return "";
+  return value.includes(":") ? value : `${value}:${instancePorts(settings.port).game}`;
+}
+
 function buildArgs(s: Settings, playlist: string, map: string): string[] {
   const ports = instancePorts(s.port);
   const args = [
@@ -252,7 +264,8 @@ function buildArgs(s: Settings, playlist: string, map: string): string[] {
   ];
   if (s.visibility === 0) args.push("-offline", "+sv_onlineAuthEnable", "0");
   // 上报/探测用的公网地址：NAT 主机上引擎自测拿不到，不传就永远上不了架。
-  if (s.hostip.length > 0) args.push("+hostip", s.hostip);
+  const hostip = hostipArgument(s);
+  if (hostip.length > 0) args.push("+hostip", hostip);
   if (s.password.length > 0) args.push("+sv_password", s.password);
   if (playlist.length > 0) args.push("+launchplaylist", playlist);
   if (map.length > 0) args.push("+map", map);

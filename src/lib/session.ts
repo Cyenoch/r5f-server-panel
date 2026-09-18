@@ -399,6 +399,32 @@ function createSession() {
     await refreshState();
   }
 
+  /**
+   * 一键：问出本机的公网 IPv4，写成 `ip:游戏端口` 存进「公网地址」。
+   *
+   * 端口用本实例的游戏端口（`+hostip` 实测必须给 `ip:port`）。写入仍然走唯一入口
+   * `saveSettings`，所以校验、notice 与手工输入完全同路；取不到就如实说为什么，
+   * 不拿内网地址顶替。
+   */
+  async function detectHostip(): Promise<boolean> {
+    const detected = await run("获取公网 IP", () => api.detectPublicIp());
+    if (!detected) return false;
+    if (!detected.ok) {
+      notice("error", "没取到公网 IP", detected.reason);
+      return false;
+    }
+    const port = (api.selectedInstance(state())?.settings ?? api.defaultSettings).port;
+    const saved = await saveSettings([{ id: "hostip", raw: `${detected.ip}:${port}` }]);
+    if (saved) {
+      notice(
+        "info",
+        "公网地址来源",
+        `${detected.source} 回显的公网 IPv4 ${detected.ip}（端口用本实例的 ${port}）。这只说明本机出网地址，代理/VPN 会改出口 IP。`,
+      );
+    }
+    return saved;
+  }
+
   /** 打开（或换到）某个日志分片；`follow` 为真时继续吃增量。 */
   function openShard(path: string | null): void {
     reader = api.createLogReader(path, 2000);
@@ -517,6 +543,7 @@ function createSession() {
     saveAnnouncements,
     saveSettings,
     resetSetting,
+    detectHostip,
     openShard,
     clearLog,
     ledger: readLedger,

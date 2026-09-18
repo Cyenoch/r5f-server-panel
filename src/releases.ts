@@ -40,6 +40,7 @@ import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, statf
 import { basename, join } from "node:path";
 import { ROOT } from "./state";
 import { type VersionInfo, discoverVersions } from "./versions";
+import { HIDDEN_CONSOLE } from "./win";
 
 /** The publisher's stable entry point; the CDN location behind it may change. */
 export const RELEASE_ENDPOINT = "https://r5flowstate.org/dedi";
@@ -467,7 +468,7 @@ type RunResult = { code: number; out: string; err: string; missing: boolean };
 async function run(cmd: string[], opts: { signal?: AbortSignal; onTick?: () => void } = {}): Promise<RunResult> {
   let proc: Bun.Subprocess<"ignore", "pipe", "pipe">;
   try {
-    proc = Bun.spawn({ cmd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    proc = Bun.spawn({ ...HIDDEN_CONSOLE, cmd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   } catch (cause) {
     // Missing binary: the caller walks its fallback ladder.
     return { code: -1, out: "", err: message(cause), missing: true };

@@ -94,6 +94,7 @@
 | 字段           | 类型            | 默认                  | 说明                                                                           |
 | -------------- | --------------- | --------------------- | ------------------------------------------------------------------------------ |
 | `hostname`     | string          | `R5F Server`          | 服务器名，1–60 字符，显示在服务器列表与控制台标题                              |
+| `hostip`       | string          | 空                    | `+hostip`：对外公布的公网地址，NAT/云主机必填；可一键获取本机公网 IP 填入      |
 | `map`          | string          | `mp_rr_arena_habitat` | 启动地图，候选来自当前版本真实清单                                             |
 | `playlist`     | string          | `fs_1v1`              | 启动即进入的模式；留空 = 由玩家选。取自 R5F 模式目录（按家族分组）             |
 | `visibility`   | 0/1/2           | `0`                   | `spire_host_visibility`：0 离线直连 / 1 隐藏 / 2 公开列表                      |
@@ -218,7 +219,7 @@ r5-server\
 | 那句英文（与 `rate limit exceeded`）是主服文案，二进制里搜不到                                                                | 只出现在 `/spire/...` 回包之后                           |
 | TCP 通 ≠ UDP 通；本构建没有 A2S，外部 UDP 探针没回应不能定罪                                                                  | 云侧按「协议 + 端口」逐条放行；`server.dll` 搜不到 `A2S` |
 
-要看四处：面板「可见性」设为公开（为 0 时启动带 `-offline`）；主机没有改写出口 IP 的代理/VPN；添加 `+spire_showdebuginfo 1` 后核对 publish 的 `ip`，必要时指定 `+hostip <公网IP>:<端口>`；云防火墙与主机环境配置均放行同一个 UDP 端口。
+要看四处：面板「可见性」设为公开（为 0 时启动带 `-offline`）；主机没有改写出口 IP 的代理/VPN；添加 `+spire_showdebuginfo 1` 后核对 publish 的 `ip`，必要时在「开服检查清单」或实例设置的「公网地址」里点**获取当前公网 IP**（问三家 HTTPS 回显服务要本机公网 IPv4，写成 `ip:游戏端口` 存进该设置；它只知道本机出网地址，代理/VPN 改出口时仍会判不可达）；云防火墙与主机环境配置均放行同一个 UDP 端口。
 
 ## 已知边界
 
@@ -318,8 +319,9 @@ Windows 防火墙、页面文件、Defender、电源与自启只读写模拟状�
 构建环境需要提前准备；这些工具只用于构建，**不随 EXE 分发**：
 
 - Bun；Windows 使用 **x64 Bun**，包括在 ARM64 Windows 上构建。当前 Solid 编译器的 ARM64 WASI 路径不能在 Bun 正常初始化。
-- Git 与完整递归子模块；根目录 `rust-toolchain.toml` 指定的开发工具链。
-- 内嵌 Bun 固定工具链：`nightly-2026-07-20`（含 `rust-src`）、LLVM/Clang/LLD **21**、Ninja **1.13.0**、CMake、Python 3、Perl。固定提交及版本以 `vendor/solid-gpui/crates/solid-gpui-bun-sys/bun-build.json` 为准。
+- Git 与完整递归子模块，且子模块必须停在仓库记录的 gitlink（当前 `f3f8590b`）：pin 文件 `crates/solid-gpui-bun-sys/bun-build.json` 只存在于该提交，工作树停在别的提交时打包器第一步就报读不到 pin。子模块内有未提交改动时先 `git stash`，再 `git submodule update --init --recursive`。根目录工具链见 `rust-toolchain.toml`。
+- 内嵌 Bun 固定工具链：`nightly-2026-07-20`（含 `rust-src`）、LLVM/Clang/LLD **21**、Ninja **1.13.0**、CMake、Python 3、Perl，以及 Windows x64 目标的 **NASM**（BoringSSL 与 libjpeg-turbo 的 x86-64 汇编；缺它 configure 直接报 `nasm not found in toolchain`）。固定提交及版本以 `vendor/solid-gpui/crates/solid-gpui-bun-sys/bun-build.json` 为准。
+- **行尾必须是 LF**：`bun_embed.patch` 自身是 LF，而 Git for Windows 默认 `core.autocrlf=true` 会把它检出成 CRLF，`git apply` 随即在 29 个文件上全部失败。把子模块配成 LF（`git -C vendor/solid-gpui config core.autocrlf false` 后重新检出该目录），并给打包进程设 `GIT_CONFIG_COUNT=1` / `GIT_CONFIG_KEY_0=core.autocrlf` / `GIT_CONFIG_VALUE_0=false` —— 打包器检出到缓存里的 Bun 源码同样必须保持 LF。
 - **由该固定提交构建的 Bun 序列化器**（必需）：序列化载荷不带格式版本，打包器读 `bun --revision` 并拒绝任何其他提交；上游不会替你构建或下载它（`vendor/solid-gpui/docs/distribution.md`）。可以复用上游嵌入构建缓存里的那个（`SOLID_GPUI_BUN_CACHE` 目录下的 `bun-build/bun-debug`，由 `solid-gpui-bun-sys` 的嵌入构建产出），也可以自行从固定提交构建；两条路都用绝对路径经 `R5_BUILD_BUN` 传入。图目标平台与构建机不一致时（默认的 macOS → Windows 就是这样）还要用 `R5_BUILD_BASE` 给出**目标平台、同一提交**的 Bun，否则打包器会拒绝下载不受提交约束的基础可执行文件。
 - Windows：Visual Studio C++ Build Tools、Windows SDK、PowerShell **7**（`pwsh` 在 PATH）。调用构建命令的终端仍可使用 PowerShell **5.1**；脚本只导入当前进程的 VS 开发环境，不修改全局配置。
 - Windows release 着色器需要 SDK 的 `fxc.exe`，可通过 `GPUI_FXC_PATH` 指定。匹配 Bun 预编译依赖的 SDK/CRT 可用 `WINDOWS_SYSROOT` 指定；本机使用 SDK 10.0.26100 与 MSVC 14.44。
@@ -353,7 +355,9 @@ bun run package
 | `R5_BUILD_MACOS_SDK`         | 指定兼容 LLVM 21 的 macOS SDK；本机使用 26.5，27 的头文件不兼容                                                  |
 | `R5_BUILD_DEPLOYMENT_TARGET` | macOS 部署目标；与上面的 SDK 配套指定                                                                            |
 
-例如 macOS 本地单文件验证用 `bun run package --target aarch64-apple-darwin --profile debug`，输出 `dist/r5-server`。当前 pin 下这条命令已实跑通过（151.36s，产物 363613176 B，SHA-256 `75a8e596…03c5`，入口 `/$bunfs/root/app.js` + worker `/$bunfs/root/worker.js`）。两个边界都必须读完：`otool -L` 显示这个 **debug 产物依赖 Homebrew LLVM 21 的 `libclang_rt.ubsan_osx_dynamic.dylib`（非系统库），不满足依赖闭包，不能当可分发产物**；而 **Windows x64 目标仍未验收** —— 它要在有目标平台固定版本 Bun 当编译基线的机器上构建和验收。
+例如 macOS 本地单文件验证用 `bun run package --target aarch64-apple-darwin --profile debug`，输出 `dist/r5-server`。当前 pin 下这条命令已实跑通过（151.36s，产物 363613176 B，SHA-256 `75a8e596…03c5`，入口 `/$bunfs/root/app.js` + worker `/$bunfs/root/worker.js`）；但 `otool -L` 显示这个 **debug 产物依赖 Homebrew LLVM 21 的 `libclang_rt.ubsan_osx_dynamic.dylib`（非系统库），不满足依赖闭包，不能当可分发产物**。
+
+Windows x64 release 已在真机实跑通过（2026-09-18，Windows 11 Pro / Ryzen 7 9700X）：产物 `dist/r5-server.exe`，**110154240 B**，SHA-256 `a2e54758…fee5`，图载荷摘要 `c5b1b7f6…29e5`，入口 `B:/~BUN/root/app.js` + worker `B:/~BUN/root/worker.js`。`llvm-objdump -p` 的导入表只有系统 DLL（`kernel32`/`d3d11`/`dcomp`/`dwrite`/`icuuc` 等），**不需要 VC++ 运行库，也不依赖相邻 Bun 或 JS**。冒烟把 exe 单独复制成带中文与空格的 `单文件 面板.exe`，`PATH` 只留 Windows 自带目录（不含 Bun / cargo / Git / LLVM / Python）启动，窗口完整渲染、内嵌 JS 与 worker 落下了数据根。构建机与目标同为 `x86_64-pc-windows-msvc` 时**不需要 `R5_BUILD_BASE`**；序列化器由固定提交现场构建（`--revision` = `1.4.0-debug+34cbb9a40`）。细节与踩坑见 [docs/solid-gpui-notes.md](docs/solid-gpui-notes.md)。
 
 上游仍把这套静态打包标为实验性，且 CI 不验证静态应用包与各目标资格；目标状态表见 `vendor/solid-gpui/docs/distribution.md`。
 
@@ -431,6 +435,6 @@ bun run fmt                    # 写回格式
 - 级别：`Native(E)/(F)` **不是**错误级别（`Native(E)` 里有正常行）；判级别按文件与词。
 - 外发：1v1 对战统计 POST 到 `https://play.r5flowstate.org/stats/1v1/ingest`（`fs_stats_url`，置空即关闭）；Spire 匹配/封禁走 `spire_matchmaking_hostname`；`-offline` 关闭匹配。
 - Spire 上报（实测日志 + 主服接口）：每 `spire_host_update_interval`（默认 5 s）POST `https://play.r5flowstate.org/spire/hosts/publish`，body = `name` `description` `hidden` `map` `playlist` `ip` `port` `key` `checksum` `version` `numPlayers` `maxPlayers` `timeStamp` `password`。
-- 上架条件（实测）：`ip` 正确（`+hostip <公网IP>[:端口]`，引擎在 NAT 主机上自测为 `[::1]:0`，`net_public_adr` 无效）+ **publish 从主机自己的公网 IP 出去**（主机上跑代理/VPN 会改出口 IP，主服照样判不可达；实测加直连规则后立即上架）+ 两道门放行 UDP。主服会 UDP 探测该 `ip:port`（`pktmon` 抓包可见双向包），探测不过即回 `{"success":false,"error":"Unable to communicate, please forward your ports and check if the server is publicly accessible."}` —— 主服文案，引擎原样打印（二进制里搜不到，`rate limit exceeded` 同理）。
+- 上架条件（实测）：`ip` 正确（`+hostip <公网IP>[:端口]`，引擎在 NAT 主机上自测为 `[::1]:0`，`net_public_adr` 无效；**面板一律传 `ip:端口`** —— 实测只写 IP 时对外公布的端口不对）+ **publish 从主机自己的公网 IP 出去**（主机上跑代理/VPN 会改出口 IP，主服照样判不可达；实测加直连规则后立即上架）+ 两道门放行 UDP。主服会 UDP 探测该 `ip:port`（`pktmon` 抓包可见双向包），探测不过即回 `{"success":false,"error":"Unable to communicate, please forward your ports and check if the server is publicly accessible."}` —— 主服文案，引擎原样打印（二进制里搜不到，`rate limit exceeded` 同理）。
 - 列表查询（实测）：`POST /spire/hosts`，body `{"version":"R5FlowstateSDK002"}` → `{servers:[{ip,port,name,numPlayers,map,playlist,key,hidden,hasPassword,maxPlayers,description,checksum,allowedMods,requiredMods,modsProfile}],players,capacity}`；空 body 回 `{"error":"Missing required fields.","success":false}`。官方 `r5flowstate.org/host/`：探测不过的服不会出现在列表。相关 cvar：`hostip`、`hostport`（cfg 默认 37015）、`clientport` 37005、`s2sPort` 37016、`spire_showdebuginfo`（1 = 打印请求/回包）、`_sdk_apply_launch_convars`（`+cvar` 启动参数压回 cfg 之上）。
 - 日志含运行期密钥（`Installed NetKey: '…'`）→ 分享日志前注意。

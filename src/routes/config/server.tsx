@@ -161,6 +161,20 @@ function SettingDialog(props: { field: FieldDef | null; onClose: () => void }): 
               {`允许值：${props.field.spec}　|　${props.field.scope}`}
             </Text>
             <View style={{ flexGrow: 1, minWidth: 0 }} />
+            {props.field.id === "hostip" ? (
+              <Action
+                label="获取当前公网 IP"
+                icon="lucide:globe"
+                variant="ghost"
+                compact
+                disabled={store.busy() !== null}
+                tooltip={`问回显服务要本机公网 IPv4，写成 IP:${store.settings().port} 存进这一项`}
+                onPress={() => {
+                  void store.detectHostip();
+                  props.onClose();
+                }}
+              />
+            ) : null}
             <Action
               label="恢复默认"
               icon="lucide:refresh-cw"

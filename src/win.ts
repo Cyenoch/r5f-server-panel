@@ -58,8 +58,16 @@ export function initConsole(): void {
   }
 }
 
+/**
+ * 打包后的面板是 GUI 子系统进程，自己**没有控制台**：Windows 会给每个控制台子进程新建
+ * 一个**可见**窗口。开发时 `bun run dev` 有控制台、子进程直接继承，所以看不出来；发行版里
+ * 却是每次 PowerShell 探测都闪一个「Windows PowerShell」窗口（主机体检 30 秒一次）。
+ * 所有控制台子进程都从这里带上这一项；非 Windows 平台忽略它。
+ */
+export const HIDDEN_CONSOLE = { windowsHide: true } as const;
+
 function run(cmd: string[], opts: { cwd?: string } = {}) {
-  const p = Bun.spawnSync({ cmd, cwd: opts.cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const p = Bun.spawnSync({ ...HIDDEN_CONSOLE, cmd, cwd: opts.cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   return {
     code: p.exitCode ?? -1,
     out: p.stdout.toString().trim(),
@@ -96,7 +104,7 @@ export function schtasks(args: string[]) {
  * sync helpers there would stall the render loop.
  */
 async function runAsync(cmd: string[], opts: { cwd?: string } = {}) {
-  const p = Bun.spawn({ cmd, cwd: opts.cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+  const p = Bun.spawn({ ...HIDDEN_CONSOLE, cmd, cwd: opts.cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
   const [out, err] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text()]);
   await p.exited;
   return { code: p.exitCode ?? -1, out: out.trim(), err: err.trim() };
@@ -180,6 +188,7 @@ export async function elevateSelf(args: string[]): Promise<number | null> {
     "}",
   ].join("\n");
   const child = Bun.spawn({
+    ...HIDDEN_CONSOLE,
     cmd: psCommand(script, true),
     stdout: "inherit",
     stderr: "inherit",

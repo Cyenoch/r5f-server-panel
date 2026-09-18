@@ -165,6 +165,14 @@ export type ActionResult<T> = T | "no-control";
 export { DEV_MODE };
 
 /**
+ * 主机自己的公网 IPv4：「公网地址」那一项的一键获取用它。
+ *
+ * 取到的只是回显服务看到的出网地址，不等于主服一定看得到（代理/VPN 会改出口 IP）——
+ * 调用方要把来源与这个边界一起说给用户听，别把它说成「已可上架」。
+ */
+export { detectPublicIp } from "./publicip";
+
+/**
  * 面板模块引导：补齐开发沙箱（fixtures + 状态文件）。
  *
  * 桌面端第一次 `loadState()` 之前必须已经就位（`session.ts` 会先 import 本模块），

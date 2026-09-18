@@ -1,6 +1,6 @@
 # solid-gpui 适配与剩余问题
 
-更新时间：2026-09-17。当前子模块 pin 为 **`f3f8590bf150bad361d40eecde991a1fbc184b06`**（统一 Vite 工具链与公共打包 API），从 `e5448f62` 升级。
+更新时间：2026-09-18。当前子模块 pin 为 **`f3f8590bf150bad361d40eecde991a1fbc184b06`**（统一 Vite 工具链与公共打包 API），从 `e5448f62` 升级。新增 Windows x64 打包与真机冒烟记录（含一个发行版专属缺陷的修复），见下面 2026-09-18 小节。
 
 除下面新增的迁移小节外，**本文其余全部经验与验收记录都采集于更早的 pin（`fbd73f6` / `e5448f62`），只属于旧提交，不构成当前修订的验证**。证据按平台分别记录；**上游记录**指 SDK 自己的示例/测试，**源码分析**不等于运行验收。历史阶段的分发方案（旁置 Bun、旧 `bun run build`）已由本轮的公共打包链取代。
 
@@ -47,7 +47,7 @@
 
 pin 保持 `f3f8590b` 的理由（上游提示调查）：更新的 `1c2a4fa` 修的是目标 pin 之后（`f830c0b` 引入）的 DTO 扫描器问题；本应用没有自定义 DTO exporter，也不需要因此离开目标提交，更没有在应用侧复制任何 lexer。
 
-**边界**：以上是 macOS ARM64 debug 的运行验证（含真机 GUI 与改名/单文件冒烟，见上），而 debug 产物带非系统的 UBSan 动态库，不满足分发所需的依赖闭包；**Windows x64 仍未验收**（本机没有目标平台的固定版本 Bun 当编译基线）。上游的 `gpui` `fetch_update` 弃用告警与 `block 0.1.6` future-incompatibility 告警保持可见，未隐藏。本文下方旧章节的证据全部属于 `fbd73f6` / `e5448f62`。
+**边界**：以上是 macOS ARM64 debug 的运行验证（含真机 GUI 与改名/单文件冒烟，见上），而 debug 产物带非系统的 UBSan 动态库，不满足分发所需的依赖闭包；Windows x64 release 已由下一节在真机上补上验收。上游的 `gpui` `fetch_update` 弃用告警与 `block 0.1.6` future-incompatibility 告警保持可见，未隐藏。本文下方旧章节的证据全部属于 `fbd73f6` / `e5448f62`。
 
 失败路径分两类，**已实测的范围不同**，也不能都当成「重活之前停住、不带调用栈」：
 
@@ -61,6 +61,54 @@ pin 保持 `f3f8590b` 的理由（上游提示调查）：更新的 `1c2a4fa` �
 
 - 入口检索（脚本自己的 `BuildFailure`，只报契约、不带调用栈）：Vite 没把应用入口写进 `.solid-gpui/artifacts.json` 的 `bundle`；worker 模式没在 `build.ssr` 里声明入口、产出的入口 chunk 不是恰好一个、chunk 的 `facadeModuleId` 与声明的入口不一致、worker 构建的 outDir 与应用构建记录不一致；两个入口文件缺失。**这些是实现的 fail-closed 分支，本轮没有逐个实跑**（正常路径已通过）。
 - 上游打包器（错误来自 SDK，**可能带调用栈**）：SDK checkout 不完整、序列化器提交不匹配、目标平台缺编译基线、原生清单不合法、镜像机器类型或模块图摘要与序列化负载不一致。**主流程闸门实跑到的是序列化器提交不匹配**：Vite 应用入口（139 模块）与 worker 入口（38 模块）都已产出、原生图也已准备，SDK 才在 `verifySerializerRevision` 拒绝当前机的 Bun 1.4.2（`744846f84` vs 固定 `34cbb9a40…`）并以 1 退出；因为发布是原子的，`dist/r5-server` 保持不变。其余条目同样是实现上的 fail-closed 分支，本轮未逐个实跑。
+
+## 2026-09-18：Windows x64 release（pin `f3f8590b`，打包 + 真机冒烟 + 修掉一个发行版专属缺陷）
+
+本机 Windows 11 Pro 26200 / Ryzen 7 9700X / 32 GB。命令就是 README 的 `bun run package`，全流程未改应用逻辑（唯一代码改动见下面那个发行版专属缺陷）。
+
+产物与身份：
+
+- `dist/r5-server.exe`，**110154240 B**，SHA-256 `a2e54758e0c94293da8915744d74d29faf68f34e1e800cb22c3429a86e2efee5`；PE32+ / Subsystem Windows GUI / linker 14.0。
+- 图载荷摘要 `c5b1b7f60fb901c84399e841020554a9df79f573f9ad7c95d4a0ec614c3f29e5`；入口 `B:/~BUN/root/app.js`、worker `B:/~BUN/root/worker.js`（与 macOS 的 `/$bunfs/root/…` 同一条身份规则，平台前缀不同）。
+- 原生清单：`profile=release`、1125 objects / 6 archives、`webkitMode=prebuilt`、`cargoArgs` 含 `-Zbuild-std=core,alloc,std,proc_macro,panic_abort`、`rustFlags` 含 `-Ctarget-cpu=nehalem`。
+- 上游资格仍是 `experimental`（其 evidence 只到「Windows 11 ARM64 VM 里无头跑过 debug 镜像的夹具探针」）；一次命中缓存的重建：命令整体 179.3s，其中打包器自报 164.4s。
+
+冒烟（真机 GUI，不是「进程起来了」）：
+
+- 把 exe **单独**复制成 `C:\Users\Ryu\.cache\r5b\smoke-clean\单文件 面板.exe`（含中文与空格），`PATH` 只留 `C:\WINDOWS\system32;C:\WINDOWS;C:\WINDOWS\System32\Wbem;C:\WINDOWS\System32\WindowsPowerShell\v1.0\;C:\WINDOWS\System32\OpenSSH\`（不含 Bun / cargo / Git / LLVM / Python），cwd 与 `R5_SERVER_ROOT` 都指向该目录、`R5F_DEV=1`。
+- 窗口出现并响应：标题 `[模拟] R5Flowstate — 0 个实例运行中`；`PrintWindow` 抓图 1296×828 显示完整界面 —— 侧栏七个页面、四张统计卡（运行实例 0/1、在线玩家 0 人、观测峰值 0 人、内存占用 0 GB）、四张趋势图（含「暂无观测数据」空态）、状态栏「本机模拟 · 不连接真实玩家」。
+- 数据根落下真实结构：`.dev\r5f\` 里的 `r5-server.json`、`metrics.sqlite`、`.state-lock.sqlite` 与两份夹具版本 `r5f-dedi-1.0.13-dev` / `1.0.14-dev` —— 内嵌 JS 与 worker 确实在跑，不是宿主空壳。
+- `llvm-objdump -p` 的导入表只有系统 DLL：`kernel32`、`ntdll`、`powrprof`、`psapi`、`pdh`、`bcryptprimitives`、`gdi32`、`dxgi`、`d3d11`、`dcomp`、`dwrite`、`dwmapi`、`imm32`、`comctl32`、`uiautomationcore`、`icuuc`、`gdiplus` 与若干 `api-ms-win-*` —— **Windows release 产物的依赖闭包成立**（对比 macOS debug 产物带非系统的 UBSan 动态库）。
+
+Windows 上真正会挡住打包的四处（都已实测）：
+
+1. **子模块必须停在仓库记录的 gitlink**。工作树原先在 `66f17e0`，而 `crates/solid-gpui-bun-sys/bun-build.json` 只在记录提交 `f3f8590b` 上存在；不修的话打包器第一步就报读不到 pin。子模块内的既有未提交改动先 `git stash`（本次存成 `stash@{0}`），再 `git submodule update --init --recursive`。
+2. **`core.autocrlf` 必须是 false**。Git for Windows 默认 `true` 会把 LF 的 `bun_embed.patch` 检出成 CRLF：`git apply --check` 在 **29 个文件上全部** `patch does not apply`。修法是子模块内 `git config core.autocrlf false` 并重新检出该 crate，同时给打包进程设 `GIT_CONFIG_COUNT=1` / `GIT_CONFIG_KEY_0=core.autocrlf` / `GIT_CONFIG_VALUE_0=false` —— 打包器检出到缓存里的 Bun 源码也必须保持 LF。
+3. **NASM 是硬前置**。缺它时 configure 直接报 `nasm not found in toolchain`（BoringSSL win-x64 与 libjpeg-turbo x86-64 的汇编）；本次装 2.16.03 并把目录放进 PATH。
+4. **序列化器必须从固定提交现场构建**（上游不构建也不下载）：用同一份缓存源码另配一个普通构建目录（`--profile=debug-no-asan --os=windows --arch=x64 --webkit=prebuilt --configure-only`）后 `ninja bun-debug.exe`，产物 202954752 B，`--revision` = `1.4.0-debug+34cbb9a40`（打包器只比对提交前缀）。构建机与目标同为 win-x64 时不需要 `R5_BUILD_BASE`。
+
+本机为此准备的构建期依赖（都不随 EXE 分发）：rustup `nightly-2026-07-20` + `rust-src` + `x86_64-pc-windows-msvc`、LLVM/Clang/LLD 21.1.8、Ninja 1.13.0 与 CMake 4.4.3（pip --user）、NASM 2.16.03、Python 3.12、Perl 5.38（Git 自带）、Visual Studio 2026 Community 的 VC 工具 + Windows SDK 10.0.26100（`fxc.exe` 在）、PowerShell 7。
+
+### 发行版专属缺陷：无控制台宿主会给每个控制台子进程新建可见窗口（已修）
+
+**现象**：用户跑发行版后「不停地弹出 PowerShell 窗口」，窗口标题是 `管理员: Windows PowerShell`（面板本身从其提权终端启动，所以子窗口也带管理员）。
+
+**复现**（修复前的 `dist/r5-server.exe`，SHA-256 `39b14735…88fc`，真机、非模拟）：以独立数据根启动，用 `EnumWindows + IsWindowVisible` 每秒采样 75 s —— 出现**可见窗口** `Windows PowerShell`（启动后 6 s 首次出现，之后每 30 秒一批），`powershell.exe` 峰值 2 个；`Win32_Process` 显示这些子进程的父进程就是面板本体，命令行是 `collectHostFacts` 那段脚本。
+
+**根因**：打包出来的面板是 **GUI 子系统进程**（`Subsystem 0x2`），自己没有控制台；Windows 于是给每个控制台子进程（`powershell.exe`、`schtasks.exe`、解压工具）**新建一个可见控制台窗口**。开发时 `bun run dev` 由有控制台的 Bun 启动，子进程直接继承控制台，所以这个现象只在发行版里出现。`lib/session.ts` 的 `SLOW_INTERVAL = 30_000` 让主机体检每 30 秒跑一次，窗口于是每 30 秒弹一批。
+
+**修复**：`src/win.ts` 新增一处声明 `HIDDEN_CONSOLE = { windowsHide: true }`，`run` / `runAsync` / `elevateSelf` 三个 spawn 点与 `src/releases.ts` 的外部工具 spawn 一律带上它（`windowsHide` 在非 Windows 平台被忽略）。
+
+**验证**（四步，全部实测）：
+
+- 隔离实验：用 `bun build --compile --windows-hide-console` 造一个 GUI 子系统宿主（系统 Bun 1.4.2 与固定提交的 `bun-debug.exe` 各一次），让 PowerShell 子进程自己报 `GetConsoleWindow()` —— 不带 `windowsHide` 时 `handle=1706958`（有窗口），带上时 `handle=0`（没有控制台）。**这个开关就是窗口有无的唯一变量**。
+- 发行版内含确认：修复后 exe 的模块图里能找到 `var HIDDEN_CONSOLE = { windowsHide: true };` 以及 `runAsync` / `run` 里的 `...HIDDEN_CONSOLE`（临时在 `collectHostFacts` 脚本里加了两行探针，让子进程自报 `[Console]::WindowWidth` 能否读到）：修复后的面板 4 个子进程样本全部 `noconsole`；探针随后已从源码移除并重新打包。
+- 窗口观察：修复后的 exe 在真机上跑 78 s（覆盖两轮主机体检）**零 PowerShell 窗口**；对照组（面板不运行）同样零。
+- 冒烟回归：同一份 exe 在纯 Windows PATH 下改名启动，界面照常渲染、数据根照常落下。
+
+**未决**：`commands.ts` 起引擎（`r5apex_ds.exe`，同样是控制台程序）的那处 spawn **没有加这个开关**：它与控制台的关系没有实测依据（托管控制台走 `R5F_CONSOLE_IN/OUT` 命名管道，窗口看着只是残留），要动它得先真起一次引擎验证；真引擎启动是 3.2 GB 级操作，本次没做。
+
+**边界**：以上只证明「Windows x64 release 能构建、能在纯 Windows PATH 下起真机 GUI、能跑内嵌 JS + worker，且主机体检不再弹窗」。没有验证：真引擎（冒烟用 `R5F_DEV=1` 模拟后端，未挂 `r5f-dedi-*` 版本目录开真服）、Windows 上的显卡/输入法/多实例压力与 16 MiB 栈、`--profile debug` 与 ARM64/交叉目标、以及 macOS 侧的任何重跑。上游资格仍是 `experimental`。
 
 ## 根目录与严格单文件分发
 
