@@ -66,7 +66,7 @@ pin 保持 `f3f8590b` 的理由（上游提示调查）：更新的 `1c2a4fa` �
 
 本机 Windows 11 Pro 26200 / Ryzen 7 9700X / 32 GB。命令就是 README 的 `bun run package`，全流程未改应用逻辑（唯一代码改动见下面那个发行版专属缺陷）。
 
-产物与身份：
+产物与身份（验收产物；之后同一构建链又出了一版 `110159360 B` / SHA-256 `dad06aa7…a884`，只多了下面「公网地址一键获取」那项界面功能，它另跑了 80 秒窗口观测与无障碍树点击）：
 
 - `dist/r5-server.exe`，**110154240 B**，SHA-256 `a2e54758e0c94293da8915744d74d29faf68f34e1e800cb22c3429a86e2efee5`；PE32+ / Subsystem Windows GUI / linker 14.0。
 - 图载荷摘要 `c5b1b7f60fb901c84399e841020554a9df79f573f9ad7c95d4a0ec614c3f29e5`；入口 `B:/~BUN/root/app.js`、worker `B:/~BUN/root/worker.js`（与 macOS 的 `/$bunfs/root/…` 同一条身份规则，平台前缀不同）。
