@@ -1,6 +1,6 @@
 # solid-gpui 适配与剩余问题
 
-更新时间：2026-09-18。当前子模块 pin 为 **`f3f8590bf150bad361d40eecde991a1fbc184b06`**（统一 Vite 工具链与公共打包 API），从 `e5448f62` 升级。新增 Windows x64 打包与真机冒烟记录（含一个发行版专属缺陷的修复），见下面 2026-09-18 小节。
+更新时间：2026-09-18。当前子模块 pin 为 **`f3f8590bf150bad361d40eecde991a1fbc184b06`**（统一 Vite 工具链与公共打包 API），从 `e5448f62` 升级。新增 Windows x64 打包与真机冒烟记录（含一个发行版专属缺陷的修复），以及拖动/缩放窗口 CPU 高的诊断，见下面两个 2026-09-18 小节。
 
 除下面新增的迁移小节外，**本文其余全部经验与验收记录都采集于更早的 pin（`fbd73f6` / `e5448f62`），只属于旧提交，不构成当前修订的验证**。证据按平台分别记录；**上游记录**指 SDK 自己的示例/测试，**源码分析**不等于运行验收。历史阶段的分发方案（旁置 Bun、旧 `bun run build`）已由本轮的公共打包链取代。
 
@@ -109,6 +109,49 @@ Windows 上真正会挡住打包的四处（都已实测）：
 **未决**：`commands.ts` 起引擎（`r5apex_ds.exe`，同样是控制台程序）的那处 spawn **没有加这个开关**：它与控制台的关系没有实测依据（托管控制台走 `R5F_CONSOLE_IN/OUT` 命名管道，窗口看着只是残留），要动它得先真起一次引擎验证；真引擎启动是 3.2 GB 级操作，本次没做。
 
 **边界**：以上只证明「Windows x64 release 能构建、能在纯 Windows PATH 下起真机 GUI、能跑内嵌 JS + worker，且主机体检不再弹窗」。没有验证：真引擎（冒烟用 `R5F_DEV=1` 模拟后端，未挂 `r5f-dedi-*` 版本目录开真服）、Windows 上的显卡/输入法/多实例压力与 16 MiB 栈、`--profile debug` 与 ARM64/交叉目标、以及 macOS 侧的任何重跑。上游资格仍是 `experimental`。
+
+## 2026-09-18：拖动 / 缩放窗口时 CPU 高（诊断记录，未改代码）
+
+**现象**（用户报告）：光是拖动窗口就能把 CPU 拉高。
+
+**测量方法**（`.tmp` 下一次性脚本，量完已删）：用 `SetWindowPos` 以固定频率合成拖动（60 Hz、±60/30 px）与缩放（±90/60 px），按 `Get-Process.TotalProcessorTime` 差值算「占一个逻辑核的百分比」，并用线程级差值定位热点线程；对照组是同一份 vendored gpui 编出的 `native/examples/window-probe.rs`（三元素的裸窗口，`cargo build --release --example window-probe`，量完已删）。每次事件成本 = 该段 CPU 毫秒 / 事件数（60 Hz、6 秒 = 360 次）。
+
+| 被测对象                          | 待机   | 移动 20 / 60 / 120 Hz    | 缩放 60 Hz |
+| --------------------------------- | ------ | ------------------------ | ---------- |
+| 面板 release（总览）              | 0.27%  | 5.4% / 12.1% / 14.0%     | 13.0%      |
+| 面板 release（`/server/instances`） | —      | — / 9.6%                 | —          |
+| 面板 release（`/config/host`）    | —      | — / 9.7%                 | —          |
+| 面板 release，窗口缩到 700×450    | —      | — / 12.0%                | —          |
+| 面板 release，进模态 move 循环但不移动 | 0.62% | —                       | —          |
+| 裸 GPUI 窗口 release              | 0.99%  | — / 2.45%                | 7.98%      |
+| 裸 GPUI 窗口 dev（gpui `opt-level = 3`） | 1.99% | — / 6.61%           | 7.61%      |
+| 裸 GPUI 窗口 dev + 临时注释掉 `refresh()` | 2.64% | — / **2.41%**      | —          |
+| `dwm.exe`                         | 各次增量均 ≈ 0          |                          |            |
+
+每次事件成本：面板移动 **3.9 ms**、面板缩放 **4.25 ms**；裸窗口移动 0.78 ms、裸窗口缩放 2.65 ms。
+
+**机制**（源码，pin `f3f8590b`）：
+
+- `vendor/gpui-windows/src/events.rs`：`WM_MOVE → handle_move_msg → callbacks.moved`、`WM_SIZE → handle_size_msg → handle_size_change`；两者都回到 `gpui/src/window.rs` 注册的 `on_moved` / `on_resize` 回调 → `Window::bounds_changed()`。
+- `bounds_changed()` 更新完 `viewport_size` / `scale_factor` / `display_id` / `mouse_position` 后**无条件调用 `self.refresh()`** → `invalidator.set_dirty(true)` → 下一帧 `window.draw(cx)`（整棵元素树重新布局 + 场景构建）+ `present()`。也就是**每一次窗口移动都强制一整帧全量 layout + paint**，即便内容与尺寸都没变。
+- 上游只在窗口不活跃或热压力时限帧（`min_frame_interval`，~30 / 60 fps），活跃窗口不设限。
+- `WM_ENTERSIZEMOVE` / `WM_ENTERMENULOOP` 另装定时器（`handle_size_move_loop` → `handle_timer_msg` → `handle_paint_msg`）：空转不进画（实测「只进模态循环不移动」≈ 待机）。
+
+**归因**：
+
+- **触发机制是 solid-gpui（上游 gpui 的 Windows 平台层）**：应用侧没有任何代码请求「移动时重绘」，整帧重绘完全由 `bounds_changed → refresh()` 决定；`dwm.exe` 全程不参与（不是合成器/GPU 的问题）；与窗口面积无关（700×450 与 1296×828 同为 ~12%），所以也不是像素填充量。
+- **代价构成要分两种动作**：
+  - **移动**：裸窗口 0.78 ms/事件 vs 面板 3.9 ms/事件 → 约 20% 是 SDK 固定开销，约 80% 是「我们自己的树每帧重新布局 + 绘制」（含 JS 侧一帧构建）。内容量影响可见：总览（图表页）12.1% vs 列表页 9.6%，差值 ≈ 0.7 ms/事件。
+  - **缩放**：裸窗口 2.65 ms/事件 ≈ 面板 4.25 的 62% → 大头在 SDK 自己的 `renderer.resize`（交换链 / 表面重造）路径，我们的树只占小头。
+- **修复假设已验证**：临时把 `bounds_changed()` 里的 `self.refresh()` 注释掉后，裸窗口 dev 移动成本 **6.61% → 2.41%**（766 → 281 ms）；剩下的那部分与布局无关（事件 + present）。实验已还原（`git -C vendor/solid-gpui checkout -- vendor/gpui/src/window.rs`），仓库与子模块都回到 pin 状态。
+
+**建议**（按性价比）：
+
+1. **上游**：`bounds_changed()` 不该无条件 `refresh()` —— 纯移动不改变内容与尺寸，真正改了内容的 `bounds_observers` 自己会刷新。若上游接受，拖动窗口的成本会从「整帧重绘」降到接近 present 成本（按本机数据估算，面板移动 ~3.9 → 0.5 ms/事件量级）。
+2. **我们侧**（不依赖上游）：拖动/缩放成本与元素树规模成正比，总览页的图表是当前最重的一页（+0.7 ms/事件）；降低每帧节点数是唯一自主动作。
+3. **观测工具**：SDK 自带 `solid-gpui-profile`（`SOLID_GPUI_PROFILE_HUD=1`）与 `resize_probe` 的 draw p50/p95 预算（`SOLID_GPUI_RESIZE_P95_MS` / `SOLID_GPUI_RESIZE_CYCLE_P95_MS`），验收上游修复时可直接复用。
+
+**边界**：以上是 Windows 11 Pro / Ryzen 7 9700X、release 面板与同 pin vendored gpui 的实测；没有拆出「JS 一帧构建」与「Rust layout/paint」各自占比（需要上游 profiler HUD 或 `resize_probe`）；也没有验证 macOS / Linux 平台层是否同样每次移动必刷（`on_moved` 在平台无关的 `window.rs` 里，但各平台是否发送该事件需单独测）。
 
 ## 根目录与严格单文件分发
 
