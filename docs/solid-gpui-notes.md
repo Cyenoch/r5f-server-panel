@@ -114,7 +114,7 @@ Windows 上真正会挡住打包的四处（都已实测）：
 
 **现象**（用户报告）：光是拖动窗口就能把 CPU 拉高。
 
-**测量方法**（`.tmp` 下一次性脚本，量完已删）：用 `SetWindowPos` 以固定频率合成拖动（60 Hz、±60/30 px）与缩放（±90/60 px），按 `Get-Process.TotalProcessorTime` 差值算「占一个逻辑核的百分比」，并用线程级差值定位热点线程；对照组是同一份 vendored gpui 编出的 `native/examples/window-probe.rs`（三元素的裸窗口，`cargo build --release --example window-probe`，量完已删）。每次事件成本 = 该段 CPU 毫秒 / 事件数（60 Hz、6 秒 = 360 次）。
+**测量方法**（脚本已入库：`scripts/measure-window-cpu.ps1`，`-Mode idle|move|resize`）：用 `SetWindowPos` 以固定频率合成拖动（60 Hz、±60/30 px）与缩放（±90/60 px），按 `Get-Process.TotalProcessorTime` 差值算「占一个逻辑核的百分比」，并用线程级差值定位热点线程；对照组是同一份 vendored gpui 编出的裸窗口（三元素、`cargo build --release --example window-probe`，量完即删）。每次事件成本 = 该段 CPU 毫秒 / 事件数（60 Hz、6 秒 = 360 次）。上游 issue：<https://github.com/Cyenoch/solid-gpui/issues/2>。
 
 | 被测对象                                  | 待机           | 移动 20 / 60 / 120 Hz | 缩放 60 Hz |
 | ----------------------------------------- | -------------- | --------------------- | ---------- |
